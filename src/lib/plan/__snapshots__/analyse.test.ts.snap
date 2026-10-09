@@ -1,0 +1,13 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`analyse > matches skabelon snapshot (22.200 kg, ~93 % vægt, ~17 % rum, 11 kolli) 1`] = `
+{
+  "cogLevel": "ok",
+  "kg": 22200,
+  "kolli": 11,
+  "ldmCharged": 13.6,
+  "vPct": 17,
+  "wPct": 93,
+  "weightLimited": true,
+}
+`;
