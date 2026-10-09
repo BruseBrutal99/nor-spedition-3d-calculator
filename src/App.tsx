@@ -1,4 +1,14 @@
 import { useMemo, useState } from 'react'
+import { CargoLines } from './components/CargoLines'
+import { EmailScanner } from './components/EmailScanner'
+import { EquipmentPicker } from './components/EquipmentPicker'
+import { ExportPanel } from './components/ExportPanel'
+import { LoadScene } from './components/LoadScene'
+import { ResultStats } from './components/ResultStats'
+import { EQUIPMENT_PRESETS } from './data/equipment'
+import { LOGO_URL } from './lib/logo'
+import { formatLadmeter, packFleet } from './lib/packer'
+import type { CargoItem, Equipment, FleetPlan } from './types'
 
 function isEmbedMode(): boolean {
   if (typeof window === 'undefined') return false
@@ -10,50 +20,13 @@ function isEmbedMode(): boolean {
     return true
   }
 }
-import { CargoForm } from './components/CargoForm'
-import { EmailScanner } from './components/EmailScanner'
-import { EquipmentPicker } from './components/EquipmentPicker'
-import { ExportPanel } from './components/ExportPanel'
-import { LoadScene } from './components/LoadScene'
-import { ResultStats } from './components/ResultStats'
-import { CARGO_COLORS, EQUIPMENT_PRESETS } from './data/equipment'
-import { LOGO_URL } from './lib/logo'
-import { formatLadmeter, packFleet } from './lib/packer'
-import type { CargoItem, Equipment, FleetPlan } from './types'
-
-const DEMO_CARGO: CargoItem[] = [
-  {
-    id: 'demo-heavy',
-    name: 'Tungt colli',
-    lengthMm: 1200,
-    widthMm: 800,
-    heightMm: 1000,
-    weightKg: 1000,
-    quantity: 1,
-    allowRotation: true,
-    stackable: true,
-    color: CARGO_COLORS[0],
-  },
-  {
-    id: 'demo-box',
-    name: 'Karton',
-    lengthMm: 600,
-    widthMm: 400,
-    heightMm: 400,
-    weightKg: 10,
-    quantity: 10,
-    allowRotation: true,
-    stackable: true,
-    color: CARGO_COLORS[2],
-  },
-]
 
 const DEFAULT_EQ =
   EQUIPMENT_PRESETS.find((p) => p.id === 'trailer-13.6-240-265') ??
   EQUIPMENT_PRESETS[1]
 
 export default function App() {
-  const [items, setItems] = useState<CargoItem[]>(DEMO_CARGO)
+  const [items, setItems] = useState<CargoItem[]>([])
   const [equipment, setEquipment] = useState<Equipment>({ ...DEFAULT_EQ })
   const [allowStacking, setAllowStacking] = useState(true)
   const [fleet, setFleet] = useState<FleetPlan | null>(null)
@@ -68,6 +41,14 @@ export default function App() {
   const active = fleet?.vehicles[activeVehicle]
   const result = active?.result ?? null
   const exportItems = active?.items ?? items
+
+  const setCargo = (next: CargoItem[]) => {
+    setItems(next)
+    setFleet(null)
+    if (next.length && next.every((i) => !i.stackable)) {
+      setAllowStacking(false)
+    }
+  }
 
   const calculate = () => {
     const effectiveStacking =
@@ -123,51 +104,25 @@ export default function App() {
           </header>
 
           <div className="workspace">
-            <div className="workspace-forms">
-              <EmailScanner
-                onApply={(next, how) => {
-                  setItems((prev) =>
-                    how === 'replace' ? next : [...prev, ...next],
-                  )
-                  if (next.length && next.every((i) => !i.stackable)) {
-                    setAllowStacking(false)
-                  }
-                  setFleet(null)
-                }}
-              />
-              <CargoForm items={items} onChange={setItems} />
-              <EquipmentPicker
-                value={equipment}
-                onChange={(eq) => {
-                  setEquipment(eq)
-                  setFleet(null)
-                }}
-                allowStacking={allowStacking}
-                onAllowStackingChange={(v) => {
-                  setAllowStacking(v)
-                  setFleet(null)
-                }}
-              />
-              <ResultStats
-                result={result}
-                fleet={fleet}
-                activeVehicle={activeVehicle}
-                onSelectVehicle={setActiveVehicle}
-              />
-              <ExportPanel
-                equipment={equipment}
-                result={result}
-                items={exportItems}
-                fleet={fleet}
-                reference={
-                  fleet && fleet.vehicleCount > 1
-                    ? `${active?.label} af ${fleet.vehicleCount}`
-                    : undefined
-                }
-              />
-            </div>
+            <EmailScanner onScanned={setCargo} />
+            <CargoLines items={items} onChange={setCargo} />
+            <EquipmentPicker
+              value={equipment}
+              onChange={(eq) => {
+                setEquipment(eq)
+                setFleet(null)
+              }}
+              allowStacking={allowStacking}
+              onAllowStackingChange={(v) => {
+                setAllowStacking(v)
+                setFleet(null)
+              }}
+            />
 
-            <section className="workspace-view">
+            <section className="workspace-view" aria-label="3D-viser">
+              <div className="card-head workspace-view-head">
+                <h2>3D-viser</h2>
+              </div>
               <div className="viewport-frame">
                 {result && active && fleet ? (
                   <>
@@ -183,7 +138,9 @@ export default function App() {
                         </span>
                       </div>
                       <div className="viewport-hud-sub">
-                        {Math.round(result.totalWeightKg).toLocaleString('da-DK')}{' '}
+                        {Math.round(result.totalWeightKg).toLocaleString(
+                          'da-DK',
+                        )}{' '}
                         kg
                         {result.weightPercent >= 85 && result.fillPercent < 50
                           ? ' · vægtbegrænset'
@@ -204,7 +161,7 @@ export default function App() {
                   </>
                 ) : (
                   <div className="viewport-empty">
-                    <p>Indtast gods, vælg udstyr og tryk Beregn lastplan.</p>
+                    <p>Scan gods og tryk Beregn lastplan.</p>
                     <p className="muted">
                       Ved vægt over max pr. bil foreslås flere biler automatisk.
                     </p>
@@ -212,6 +169,25 @@ export default function App() {
                 )}
               </div>
             </section>
+
+            <ResultStats
+              result={result}
+              fleet={fleet}
+              activeVehicle={activeVehicle}
+              onSelectVehicle={setActiveVehicle}
+            />
+
+            <ExportPanel
+              equipment={equipment}
+              result={result}
+              items={exportItems}
+              fleet={fleet}
+              reference={
+                fleet && fleet.vehicleCount > 1
+                  ? `${active?.label} af ${fleet.vehicleCount}`
+                  : undefined
+              }
+            />
           </div>
         </div>
       </div>

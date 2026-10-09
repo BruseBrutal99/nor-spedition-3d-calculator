@@ -30,9 +30,8 @@ html,
 body,
 #root {
   margin: 0;
+  min-height: 100%;
   height: 100%;
-  max-height: 100%;
-  overflow: hidden;
 }
 
 body {
@@ -61,9 +60,8 @@ h3 {
 
 .app {
   display: flex;
+  min-height: 100%;
   height: 100%;
-  max-height: 100dvh;
-  overflow: hidden;
 }
 
 /* TMS iframe / ?embed=1 — no own sidebar, fill host frame */
@@ -168,18 +166,19 @@ h3 {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .main-inner {
   width: 100%;
+  max-width: 960px;
+  margin: 0 auto;
   padding: 1rem;
   display: flex;
   flex-direction: column;
   gap: 1rem;
   flex: 1;
   min-height: 0;
-  overflow: hidden;
 }
 
 @media (min-width: 768px) {
@@ -212,37 +211,28 @@ h3 {
 }
 
 .workspace {
-  display: grid;
-  grid-template-columns: minmax(300px, 400px) minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   gap: 1rem;
   flex: 1;
   min-height: 0;
-  overflow: hidden;
-  align-items: stretch;
 }
 
-.workspace-forms {
-  display: flex;
-  flex-direction: column;
-  gap: 1rem;
-  overflow-x: hidden;
-  overflow-y: auto;
-  min-height: 0;
-  max-height: 100%;
-  padding-right: 0.15rem;
-}
-
-/* Right 3D pane: locked to workspace height (≈ browser/iframe viewport) */
 .workspace-view {
-  min-height: 0;
-  height: 100%;
-  max-height: 100%;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
-  position: sticky;
-  top: 0;
-  align-self: stretch;
+  gap: 0.5rem;
+}
+
+.workspace-view-head {
+  margin: 0;
+  padding: 0 0.15rem;
+}
+
+.workspace-view-head h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
 }
 
 .card {
@@ -659,9 +649,9 @@ h3 {
 
 .viewport-frame {
   position: relative;
-  flex: 1 1 auto;
-  min-height: 0;
-  height: 100%;
+  width: 100%;
+  height: min(52dvh, 480px);
+  min-height: 320px;
   border: 1px solid #e2e8f0;
   border-radius: var(--radius);
   overflow: hidden;
@@ -921,6 +911,64 @@ h3 {
   padding: 0.65rem;
 }
 
+.scanner-preview .sw {
+  display: inline-block;
+  width: 0.55rem;
+  height: 0.55rem;
+  border-radius: 2px;
+  margin-right: 0.35rem;
+  vertical-align: middle;
+}
+
+.scanner-row-actions {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.scanner-row-actions .btn {
+  padding: 0.25rem 0.55rem;
+  font-size: 0.75rem;
+}
+
+.scanner-edit {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border: 1px solid #e2e8f0;
+  border-radius: 0.5rem;
+  background: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.scanner-edit-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.scanner-edit label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  font-size: 0.75rem;
+  color: var(--muted-foreground);
+}
+
+.scanner-edit-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+
+.scanner-edit-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.25rem;
+}
+
 @media (max-width: 960px) {
   .app {
     flex-direction: column;
@@ -956,20 +1004,4 @@ h3 {
     display: none;
   }
 
-  .workspace {
-    grid-template-columns: 1fr;
-    overflow: auto;
-  }
-
-  .workspace-forms {
-    max-height: none;
-    overflow: visible;
-  }
-
-  .workspace-view {
-    position: relative;
-    height: min(55dvh, 480px);
-    max-height: min(55dvh, 480px);
-    order: -1;
-  }
 }
