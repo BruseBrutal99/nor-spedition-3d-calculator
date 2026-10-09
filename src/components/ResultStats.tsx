@@ -23,12 +23,10 @@ function VehicleStats({ result }: { result: LoadResult }) {
         </div>
         <div className="ladmeter-hero-meta">
           <span>
-            Fysisk {result.physicalLoadingMeters.toLocaleString('da-DK', { maximumFractionDigits: 2 })}{' '}
-            m · vægt{' '}
-            {result.weightLoadingMeters.toLocaleString('da-DK', {
-              maximumFractionDigits: 2,
-            })}{' '}
-            LDM · max {eqLabel}
+            {formatKg(result.totalWeightKg)}
+            {result.weightPercent >= 85 && result.fillPercent < 50
+              ? ' · vægtbegrænset'
+              : ` · max ${eqLabel}`}
           </span>
           <span className="mono">{result.floorPercent.toFixed(0)}%</span>
         </div>

@@ -9,6 +9,7 @@ import {
 } from '@react-three/drei'
 import { BoxGeometry, EdgesGeometry } from 'three'
 import type { Equipment, PlacedBox } from '../types'
+import { LOGO_URL } from '../lib/logo'
 import { mmToM } from '../lib/packer'
 
 export type SceneVehicle = {
@@ -168,50 +169,64 @@ export function LoadScene({ equipment, vehicles, activeIndex = 0 }: Props) {
   const list = vehicles.length ? vehicles : [{ label: 'Bil 1', placed: [] }]
 
   return (
-    <Canvas
-      shadows
-      camera={{ position: [22, 14, 22], fov: 40, near: 0.1, far: 400 }}
-      style={{ width: '100%', height: '100%' }}
-    >
-      <color attach="background" args={['#0f172a']} />
-      <ambientLight intensity={0.6} />
-      <directionalLight
-        castShadow
-        position={[14, 22, 10]}
-        intensity={1.2}
-        shadow-mapSize={[2048, 2048]}
+    <div className="scene-root">
+      <img
+        className="scene-sky-logo"
+        src={LOGO_URL}
+        alt="NOR Spedition"
+        draggable={false}
       />
-      <hemisphereLight args={['#e2e8f0', '#334155', 0.4]} />
+      <Canvas
+        shadows
+        camera={{ position: [22, 14, 22], fov: 40, near: 0.1, far: 400 }}
+        style={{ width: '100%', height: '100%' }}
+      >
+        <color attach="background" args={['#0f172a']} />
+        <ambientLight intensity={0.6} />
+        <directionalLight
+          castShadow
+          position={[14, 22, 10]}
+          intensity={1.2}
+          shadow-mapSize={[2048, 2048]}
+        />
+        <hemisphereLight args={['#e2e8f0', '#334155', 0.4]} />
 
-      <Bounds fit clip observe margin={1.25}>
-        <group>
-          {list.map((v, i) => (
-            <group key={v.label} position={[0, 0, (i - (list.length - 1) / 2) * gap]}>
-              <TruckUnit
-                equipment={equipment}
-                vehicle={v}
-                active={i === activeIndex}
-              />
-            </group>
-          ))}
-        </group>
-      </Bounds>
+        <Bounds fit clip observe margin={1.25}>
+          <group>
+            {list.map((v, i) => (
+              <group
+                key={v.label}
+                position={[0, 0, (i - (list.length - 1) / 2) * gap]}
+              >
+                <TruckUnit
+                  equipment={equipment}
+                  vehicle={v}
+                  active={i === activeIndex}
+                />
+              </group>
+            ))}
+          </group>
+        </Bounds>
 
-      <ContactShadows
-        position={[0, -0.01, 0]}
-        opacity={0.4}
-        scale={60}
-        blur={2.5}
-        far={24}
-      />
-      <Grid
-        infiniteGrid
-        fadeDistance={60}
-        sectionColor="#3d4450"
-        cellColor="#2a2e38"
-        position={[0, -0.02, 0]}
-      />
-      <OrbitControls makeDefault maxPolarAngle={Math.PI / 2.05} />
-    </Canvas>
+        <ContactShadows
+          position={[0, -0.01, 0]}
+          opacity={0.45}
+          scale={60}
+          blur={2.5}
+          far={24}
+        />
+        <Grid
+          infiniteGrid
+          fadeDistance={55}
+          fadeStrength={1.2}
+          sectionColor="#3d4450"
+          cellColor="#2a2e38"
+          sectionThickness={1.1}
+          cellThickness={0.7}
+          position={[0, -0.02, 0]}
+        />
+        <OrbitControls makeDefault maxPolarAngle={Math.PI / 2.05} />
+      </Canvas>
+    </div>
   )
 }

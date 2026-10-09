@@ -1,4 +1,15 @@
 import { useMemo, useState } from 'react'
+
+function isEmbedMode(): boolean {
+  if (typeof window === 'undefined') return false
+  const q = new URLSearchParams(window.location.search)
+  if (q.has('embed') || q.get('mode') === 'embed') return true
+  try {
+    return window.self !== window.top
+  } catch {
+    return true
+  }
+}
 import { CargoForm } from './components/CargoForm'
 import { EmailScanner } from './components/EmailScanner'
 import { EquipmentPicker } from './components/EquipmentPicker'
@@ -47,6 +58,7 @@ export default function App() {
   const [allowStacking, setAllowStacking] = useState(true)
   const [fleet, setFleet] = useState<FleetPlan | null>(null)
   const [activeVehicle, setActiveVehicle] = useState(0)
+  const embed = useMemo(() => isEmbedMode(), [])
 
   const canCalculate = useMemo(
     () => items.length > 0 && items.every((i) => i.quantity > 0),
@@ -68,7 +80,7 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div className={embed ? 'app app-embed' : 'app'}>
       <aside className="app-sidebar">
         <div className="sidebar-brand">
           <img
@@ -78,7 +90,6 @@ export default function App() {
             width={100}
             height={100}
           />
-          <p className="sidebar-app-name">Nexum TMS</p>
         </div>
         <div className="sidebar-nav">
           <div className="nav-item" aria-current="page">
@@ -98,8 +109,7 @@ export default function App() {
             <div>
               <h1>3D Load Calculator</h1>
               <p className="subtitle">
-                Colli → udstyr → lastplan. Ved overvægt fordeles godset automatisk
-                på flere biler med jævn vægt. Non-stack lægges kun på gulvet.
+                Velkommen til Nors 3D Load calculator
               </p>
             </div>
             <button
@@ -173,19 +183,13 @@ export default function App() {
                         </span>
                       </div>
                       <div className="viewport-hud-sub">
-                        Fysisk{' '}
-                        {result.physicalLoadingMeters.toLocaleString('da-DK', {
-                          maximumFractionDigits: 2,
-                        })}{' '}
-                        m · vægt{' '}
-                        {result.weightLoadingMeters.toLocaleString('da-DK', {
-                          maximumFractionDigits: 2,
-                        })}{' '}
-                        LDM ·{' '}
                         {Math.round(result.totalWeightKg).toLocaleString('da-DK')}{' '}
                         kg
+                        {result.weightPercent >= 85 && result.fillPercent < 50
+                          ? ' · vægtbegrænset'
+                          : ''}
                         {fleet.vehicleCount > 1
-                          ? ` · ${fleet.vehicleCount} biler vises i 3D`
+                          ? ` · ${fleet.vehicleCount} biler`
                           : ''}
                       </div>
                     </div>

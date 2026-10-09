@@ -14,16 +14,22 @@ export type ScannedCargoDraft = {
   sourceLine: string
 }
 
-/** Handles 1875 / 1,875.0 / 1.875,0 / 10,5 */
+/** Handles 1875 / 1,875.0 / 1.875,0 / 10,5 / 186.000 (decimal, not thousands) */
 function parseNum(raw: string): number {
   const s = raw.replace(/\s/g, '')
   if (!s) return NaN
+  // US thousands: 1,875.0
   if (/^\d{1,3}(,\d{3})+(\.\d+)?$/.test(s)) {
     return Number(s.replace(/,/g, ''))
   }
-  if (/^\d{1,3}(\.\d{3})+(,\d+)?$/.test(s)) {
+  // EU thousands with 2+ dot groups: 1.875.000 or 1.875,50
+  if (/^\d{1,3}(\.\d{3}){2,}(,\d+)?$/.test(s)) {
     return Number(s.replace(/\./g, '').replace(',', '.'))
   }
+  if (/^\d{1,3}(\.\d{3})+,(\d+)$/.test(s)) {
+    return Number(s.replace(/\./g, '').replace(',', '.'))
+  }
+  // Plain decimal: 186.000 KG, 1.536 M3, 10,5
   return Number(s.replace(',', '.'))
 }
 
@@ -62,8 +68,9 @@ function inferName(line: string, index: number): string {
   }
 
   const lower = line.toLowerCase()
-  if (/\bpall?e?r?\b|\beur\b|\bepal\b/.test(lower)) return `Palle ${index + 1}`
+  if (/\bpall(?:e|er|es)?\b|\beur\b|\bepal\b/.test(lower)) return `Palle ${index + 1}`
   if (/\bcolli\b|\bkolli\b|\bcollies\b/.test(lower)) return `Colli ${index + 1}`
+  if (/\bpkg\b|\bpack(?:s|ages)?\b/.test(lower)) return `Pakke ${index + 1}`
   if (/\bpakke?r?\b|\bkarton|\bbox/.test(lower)) return `Pakke ${index + 1}`
   if (/\bkasse?r?\b/.test(lower)) return `Kasse ${index + 1}`
   if (/\bpcs\b|\bstk\b|\bunits?\b/.test(lower)) return `Colli ${index + 1}`
@@ -72,8 +79,9 @@ function inferName(line: string, index: number): string {
 
 function extractQuantity(line: string): number {
   const patterns = [
-    /(\d+)\s*(?:units?|pcs|stk|styk|pieces?|st\b)\b/i,
-    /(\d+)\s*[x×]\s*(?=\d+[.,]?\d*\s*[x×/])/i,
+    // "3 Pall – 120X80X127" / "17 Pall – 120X80X125" / "1 PKG …"
+    /^(\d+)\s*(?:x\s*)?(?:pkg|pack(?:s|ages)?|pall(?:e|er|es)?|collies|colli|kolli|pcs|stk|pieces?|units?|boxes|karton|pakke(?:r)?)\b/i,
+    /(\d+)\s*(?:units?|pcs|stk|styk|pieces?|collies|colli|kolli|pkg|pall(?:e|er)?|st\b)\b/i,
     /antal[:\s]+(\d+)/i,
     /qty[:\s]+(\d+)/i,
   ]
@@ -81,16 +89,34 @@ function extractQuantity(line: string): number {
     const m = line.match(re)
     if (m) {
       const n = Number(m[1])
-      // Ignore "1" from phrases like "Each unit:" when a larger qty exists elsewhere
       if (n > 0 && n < 10000) return n
     }
   }
+
+  // "2x 120x80x100" — qty before dimensions, not the first dim itself
+  const dimLike = line.match(
+    /(\d+)\s*[x×]\s*(\d+[.,]?\d*)\s*[x×]\s*(\d+[.,]?\d*)\s*[x×/]/i,
+  )
+  if (dimLike && dimLike.index != null && dimLike.index > 0) {
+    const before = line.slice(0, dimLike.index)
+    const qx = before.match(/(\d+)\s*[x×]\s*$/i)
+    if (qx) {
+      const n = Number(qx[1])
+      if (n > 0 && n < 10000) return n
+    }
+  }
+
   return 1
 }
 
 function extractWeight(line: string): number {
   // Skip total/header weight lines — those are handled separately
-  if (/total\s*(gross\s*)?(wt|weight|vægt)/i.test(line)) return 0
+  if (
+    /^(?:total\s+)?gross\s*(?:wt|weight)\b/i.test(line.trim()) ||
+    /^total\s*(gross\s*)?(wt|weight|vægt)/i.test(line.trim())
+  ) {
+    return 0
+  }
   const patterns = [
     // "/ 7200kg" or "/ 1500kg each" after dimensions
     /\/\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+[.,]?\d*)\s*kg(?:\s*(?:each|ea|pr\.?|per\s*(?:unit|stk|pcs)))?/i,
@@ -111,6 +137,8 @@ function extractTotalGrossWeightKg(text: string): number | null {
   const patterns = [
     /total\s*gross\s*wt\s*[:=]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+[.,]?\d*)\s*kg/i,
     /total\s*(?:gross\s*)?(?:weight|vægt)\s*[:=]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+[.,]?\d*)\s*kg/i,
+    // Packing list header: "Gross Weight 9900 kg" / "Gross Weight\t9900 kg"
+    /(?:^|\n)\s*gross\s*weight\s*[:=]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+[.,]?\d*)\s*kg/im,
     /samlet\s*vægt\s*[:=]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+[.,]?\d*)\s*kg/i,
   ]
   for (const re of patterns) {
@@ -135,13 +163,69 @@ type DimHit = {
 const UNIT_GROUP = '(?:mm|cms?|m|millimeters?|centimeters?|meters?)'
 
 function findDimensions(line: string): DimHit | null {
-  const patterns: RegExp[] = [
+  type Hit = {
+    l: number
+    w: number
+    h: number
+    unitRaw?: string
+    unitL?: string
+    unitW?: string
+    unitH?: string
+    index: number
+    length: number
+    perAxis: boolean
+  }
+
+  const candidates: Hit[] = []
+
+  // Packing list: "120 80 160 CM" (shared unit after three dims)
+  {
+    const re =
+      /\b(\d{2,4}(?:[.,]\d+)?)\s+(\d{2,4}(?:[.,]\d+)?)\s+(\d{2,4}(?:[.,]\d+)?)\s*(cm|cms|mm)\b/gi
+    let m: RegExpExecArray | null
+    while ((m = re.exec(line)) !== null) {
+      candidates.push({
+        l: parseNum(m[1]),
+        w: parseNum(m[2]),
+        h: parseNum(m[3]),
+        unitRaw: m[4],
+        index: m.index,
+        length: m[0].length,
+        perAxis: false,
+      })
+    }
+  }
+
+  // Packing list columns: 120.00 cm  80.00 cm  160.00 cm
+  {
+    const re = new RegExp(
+      `(\\d+[.,]?\\d*)\\s*(${UNIT_GROUP})\\s+(\\d+[.,]?\\d*)\\s*(${UNIT_GROUP})\\s+(\\d+[.,]?\\d*)\\s*(${UNIT_GROUP})`,
+      'gi',
+    )
+    let m: RegExpExecArray | null
+    while ((m = re.exec(line)) !== null) {
+      candidates.push({
+        l: parseNum(m[1]),
+        w: parseNum(m[3]),
+        h: parseNum(m[5]),
+        unitL: m[2],
+        unitW: m[4],
+        unitH: m[6],
+        unitRaw: m[6],
+        index: m.index,
+        length: m[0].length,
+        perAxis: true,
+      })
+    }
+  }
+
+  const simplePatterns: RegExp[] = [
     // Each unit: 1550 x 1720 x 860 mm (LWH)
     new RegExp(
       `(\\d+[.,]?\\d*)\\s*[x×*]\\s*(\\d+[.,]?\\d*)\\s*[x×*]\\s*(\\d+[.,]?\\d*)\\s*(${UNIT_GROUP})?(?:\\s*\\(\\s*L\\s*W\\s*H\\s*\\))?`,
       'i',
     ),
-    // Freight AWB style: 150/90/173 cms  OR  150 / 90 / 173 cm
+    // Freight AWB style: 150/90/173 cms
     new RegExp(
       `(\\d+[.,]?\\d*)\\s*/\\s*(\\d+[.,]?\\d*)\\s*/\\s*(\\d+[.,]?\\d*)\\s*(${UNIT_GROUP})?`,
       'i',
@@ -151,24 +235,35 @@ function findDimensions(line: string): DimHit | null {
       `(\\d+[.,]?\\d*)\\s*-\\s*(\\d+[.,]?\\d*)\\s*-\\s*(\\d+[.,]?\\d*)\\s*(${UNIT_GROUP})?`,
       'i',
     ),
-    // L1200 B800 H1400
     /l\s*[:=]?\s*(\d+[.,]?\d*)\s*(?:mm|cms?|m)?\s*[,;\s]+b\s*[:=]?\s*(\d+[.,]?\d*)\s*(?:mm|cms?|m)?\s*[,;\s]+h\s*[:=]?\s*(\d+[.,]?\d*)\s*(mm|cms?|m)?/i,
-    // længde … bredde … højde
     /længde\s*[:=]?\s*(\d+[.,]?\d*)\s*(?:mm|cms?|m)?\s*.{0,24}?bredde\s*[:=]?\s*(\d+[.,]?\d*)\s*(?:mm|cms?|m)?\s*.{0,24}?højde\s*[:=]?\s*(\d+[.,]?\d*)\s*(mm|cms?|m)?/i,
   ]
 
-  for (const re of patterns) {
+  for (const re of simplePatterns) {
     const m = line.match(re)
     if (!m) continue
-    const unitRaw = m[4]
-    let l = parseNum(m[1])
-    let w = parseNum(m[2])
-    let h = parseNum(m[3])
+    candidates.push({
+      l: parseNum(m[1]),
+      w: parseNum(m[2]),
+      h: parseNum(m[3]),
+      unitRaw: m[4],
+      index: m.index ?? 0,
+      length: m[0].length,
+      perAxis: false,
+    })
+  }
+
+  // Prefer the rightmost / longest match (dims usually at end of packing rows)
+  candidates.sort((a, b) => b.index - a.index || b.length - a.length)
+
+  for (const c of candidates) {
+    let l = c.l
+    let w = c.w
+    let h = c.h
     if (![l, w, h].every((n) => Number.isFinite(n) && n > 0)) continue
 
-    // Prefer explicit unit; avoid treating mm values as cm
     const inferredUnit =
-      normalizeUnit(unitRaw) ??
+      normalizeUnit(c.unitRaw) ??
       (l >= 500 || w >= 500 || h >= 500
         ? 'mm'
         : l <= 20 && w <= 20 && h <= 20
@@ -177,19 +272,24 @@ function findDimensions(line: string): DimHit | null {
             ? 'cm'
             : 'mm')
 
-    l = toMm(l, inferredUnit)
-    w = toMm(w, inferredUnit)
-    h = toMm(h, inferredUnit)
+    if (c.perAxis) {
+      l = toMm(c.l, normalizeUnit(c.unitL) ?? inferredUnit)
+      w = toMm(c.w, normalizeUnit(c.unitW) ?? inferredUnit)
+      h = toMm(c.h, normalizeUnit(c.unitH) ?? inferredUnit)
+    } else {
+      l = toMm(l, inferredUnit)
+      w = toMm(w, inferredUnit)
+      h = toMm(h, inferredUnit)
+    }
 
-    // Flat packs like 153/93/6 cm are valid (h=60mm)
     if (l > 0 && w > 0 && h > 0 && l < 20000 && w < 8000 && h < 8000) {
       return {
         l,
         w,
         h,
         unit: inferredUnit,
-        index: m.index ?? 0,
-        length: m[0].length,
+        index: c.index,
+        length: c.length,
       }
     }
   }
@@ -199,17 +299,30 @@ function findDimensions(line: string): DimHit | null {
 function lineLooksLikeCargo(line: string): boolean {
   if (!/\d/.test(line)) return false
   // Skip pure totals / headers
-  if (/^total\s+(pieces|gross|volume|wt)/i.test(line)) return false
+  if (/^total\s+(pieces|packages|packs|gross|volume|wt)/i.test(line)) return false
+  if (/^(?:quantity|gross\s*weight|volume)\b/i.test(line)) return false
+  if (/^pieces?\s+piece\s*type/i.test(line)) return false
+  if (/^packages?\s+type\s+weight/i.test(line)) return false
+  if (/^packs?\s*\(cont/i.test(line)) return false
   if (/^dimensions?\s*$/i.test(line)) return false
+  if (/med venlig hilsen|best regards/i.test(line)) return false
 
   return (
+    /\b\d{2,4}(?:[.,]\d+)?\s+\d{2,4}(?:[.,]\d+)?\s+\d{2,4}(?:[.,]\d+)?\s*(?:cm|cms|mm)\b/i.test(
+      line,
+    ) ||
+    /\d+[.,]?\d*\s*(?:mm|cms?|m)\s+\d+[.,]?\d*\s*(?:mm|cms?|m)\s+\d+[.,]?\d*\s*(?:mm|cms?|m)/i.test(
+      line,
+    ) ||
     /\d+[.,]?\d*\s*\/\s*\d+[.,]?\d*\s*\/\s*\d+/i.test(line) ||
     /\d+[.,]?\d*\s*[x×*]\s*\d+[.,]?\d*\s*[x×*]\s*\d+/i.test(line) ||
     /\d+[.,]?\d*\s*-\s*\d+[.,]?\d*\s*-\s*\d+/i.test(line) ||
     /\bl\s*[:=]?\s*\d/i.test(line) ||
     /længde/i.test(line) ||
     /each\s+unit/i.test(line) ||
-    /\b(palle|colli|kolli|pakke|karton|kasse|gods|pcs|stk|units?)\b/i.test(line)
+    /\b(pall(?:e|er|es)?|collies|colli|kolli|pakke|karton|kasse|gods|pcs|stk|units?|pkg|pack(?:s|ages)?)\b/i.test(
+      line,
+    )
   )
 }
 
@@ -243,25 +356,52 @@ function distributeTotalWeight(
   drafts: ScannedCargoDraft[],
   totalKg: number,
 ): ScannedCargoDraft[] {
-  const hasOwnWeight = drafts.some(
-    (d) => d.weightKg > 0 && !isGuessedWeight(d),
+  const known = drafts.map((d) =>
+    d.weightKg > 0 && !isGuessedWeight(d) ? d.weightKg * d.quantity : 0,
   )
-  // If any line had explicit per-piece weight, don't redistribute
-  if (hasOwnWeight) return drafts
+  const knownSum = known.reduce((a, b) => a + b, 0)
+  const missingIdx = drafts
+    .map((_, i) => (known[i] > 0 ? -1 : i))
+    .filter((i) => i >= 0)
 
-  const volumes = drafts.map(
-    (d) => (d.lengthMm * d.widthMm * d.heightMm * d.quantity) / 1e9,
-  )
-  const sumVol = volumes.reduce((a, b) => a + b, 0)
-  if (sumVol <= 0) return drafts
+  // All rows have explicit weight — keep as-is
+  if (missingIdx.length === 0) return drafts
+
+  // No explicit weights at all — share full total by volume
+  if (knownSum <= 0) {
+    const volumes = drafts.map(
+      (d) => (d.lengthMm * d.widthMm * d.heightMm * d.quantity) / 1e9,
+    )
+    const sumVol = volumes.reduce((a, b) => a + b, 0)
+    if (sumVol <= 0) return drafts
+    return drafts.map((d, i) => {
+      const lineTotal = totalKg * (volumes[i] / sumVol)
+      return {
+        ...d,
+        weightKg: Math.round((lineTotal / d.quantity) * 10) / 10,
+        confidence: Math.min(0.98, d.confidence + 0.05),
+      }
+    })
+  }
+
+  // Some rows missing weight ("… kg" without number) — assign remainder by volume
+  const remainder = Math.max(0, totalKg - knownSum)
+  if (remainder <= 0) return drafts
+
+  const missVol = missingIdx.map((i) => {
+    const d = drafts[i]
+    return (d.lengthMm * d.widthMm * d.heightMm * d.quantity) / 1e9
+  })
+  const sumMissVol = missVol.reduce((a, b) => a + b, 0)
+  if (sumMissVol <= 0) return drafts
 
   return drafts.map((d, i) => {
-    const share = volumes[i] / sumVol
-    const lineTotal = totalKg * share
-    const perPiece = lineTotal / d.quantity
+    const mi = missingIdx.indexOf(i)
+    if (mi < 0) return d
+    const lineTotal = remainder * (missVol[mi] / sumMissVol)
     return {
       ...d,
-      weightKg: Math.round(perPiece * 10) / 10,
+      weightKg: Math.round((lineTotal / d.quantity) * 10) / 10,
       confidence: Math.min(0.98, d.confidence + 0.05),
     }
   })
@@ -329,8 +469,34 @@ export function scanEmailCargoLocal(text: string): ScannedCargoDraft[] {
 
     const weightKg = extractWeight(line)
     const name = inferName(headerPart, drafts.length)
-    const key = `${dim.l}x${dim.w}x${dim.h}|${qty}|${name}`
-    if (seen.has(key)) continue
+    // Include weight so identical dims with different kg stay separate rows
+    const key = `${dim.l}x${dim.w}x${dim.h}|${Math.round(weightKg * 10) / 10}|${name}`
+    const existing = drafts.find(
+      (d) =>
+        d.lengthMm === dim.l &&
+        d.widthMm === dim.w &&
+        d.heightMm === dim.h &&
+        Math.abs(d.weightKg - (weightKg || d.weightKg)) < 0.05 &&
+        d.name.replace(/\s+\d+$/, '') === name.replace(/\s+\d+$/, ''),
+    )
+    if (existing && weightKg > 0) {
+      existing.quantity += qty
+      continue
+    }
+    if (seen.has(key) && weightKg > 0) {
+      // same dims+weight already added
+      const hit = drafts.find(
+        (d) =>
+          d.lengthMm === dim.l &&
+          d.widthMm === dim.w &&
+          d.heightMm === dim.h &&
+          Math.abs(d.weightKg - weightKg) < 0.05,
+      )
+      if (hit) {
+        hit.quantity += qty
+        continue
+      }
+    }
     seen.add(key)
 
     let confidence = 0.75
@@ -343,7 +509,9 @@ export function scanEmailCargoLocal(text: string): ScannedCargoDraft[] {
     const lineNonStack =
       /ikke\s*stabl|no\s*stack|non[\s-]?stack|ej\s*stabel|not\s*stackable|unstackable/i.test(
         line,
-      )
+      ) ||
+      /\bstackable\s*[:=]?\s*no\b/i.test(line) ||
+      /\bno\s*$/i.test(line.trim())
 
     drafts.push({
       name,
@@ -402,48 +570,86 @@ export function draftsToCargoItems(drafts: ScannedCargoDraft[]): CargoItem[] {
   }))
 }
 
-export async function scanEmailCargo(text: string): Promise<{
+export type ScanImageInput = {
+  /** data:image/...;base64,... */
+  dataUrl: string
+}
+
+export type ScanEmailOptions = {
+  image?: ScanImageInput | null
+}
+
+function splitDataUrl(dataUrl: string): {
+  mediaType: string
+  base64: string
+} | null {
+  const m = dataUrl.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/)
+  if (!m) return null
+  return { mediaType: m[1], base64: m[2] }
+}
+
+export async function scanEmailCargo(
+  text: string,
+  options: ScanEmailOptions = {},
+): Promise<{
   drafts: ScannedCargoDraft[]
   mode: 'local' | 'openai' | 'anthropic'
 }> {
   const trimmed = text.trim()
-  if (!trimmed) return { drafts: [], mode: 'local' }
+  const image = options.image?.dataUrl ? options.image : null
+
+  if (!trimmed && !image) return { drafts: [], mode: 'local' }
 
   const openaiKey = import.meta.env.VITE_OPENAI_API_KEY?.trim()
   const anthropicKey = import.meta.env.VITE_ANTHROPIC_API_KEY?.trim()
 
+  if (image && !anthropicKey && !openaiKey) {
+    throw new Error(
+      'Skærmklip kræver VITE_OPENAI_API_KEY eller VITE_ANTHROPIC_API_KEY i .env',
+    )
+  }
+
   if (anthropicKey) {
     try {
-      const drafts = await scanWithAnthropic(trimmed, anthropicKey)
+      const drafts = await scanWithAnthropic(trimmed, anthropicKey, image)
       if (drafts.length) return { drafts, mode: 'anthropic' }
-    } catch {
+    } catch (err) {
+      if (image && !openaiKey) throw err
       // fall through
     }
   }
 
   if (openaiKey) {
     try {
-      const drafts = await scanWithOpenAI(trimmed, openaiKey)
+      const drafts = await scanWithOpenAI(trimmed, openaiKey, image)
       if (drafts.length) return { drafts, mode: 'openai' }
-    } catch {
+    } catch (err) {
+      if (image) throw err
       // fall through
     }
+  }
+
+  if (image) {
+    throw new Error('Kunne ikke læse skærmklippet via AI')
   }
 
   return { drafts: scanEmailCargoLocal(trimmed), mode: 'local' }
 }
 
 const EXTRACT_PROMPT = `Du er en logistik-assistent for NOR Spedition.
-Udtræk ALLE colli/paller/pakker/units fra mailteksten.
+Udtræk ALLE colli/paller/pakker/units fra mailteksten og/eller skærmklip (packing list, tabel, AWB).
 Understøt formater som:
 - "1 pcs 150/90/173 cms"
 - "2x 120x80x100 cm"
 - "L1200 B800 H1000"
 - "Hub sektion: 2 units" + "Each unit: 1550 x 1720 x 860 mm (LWH) / 7200kg"
 - "Propel: 20 units" + "Each unit: 1425 x 1100 x 600 mm (LWH) / 1500kg each"
-quantity = antal units/pcs. weightKg = vægt PR. unit (ikke total).
-"non stack" / "non-stackable" / "Det hele er non stack" → stackable: false.
-Hvis "Total Gross Wt" findes og linjer mangler vægt, fordel totalvægten proportionelt efter rumfang.
+- Tabeller: Pieces | Piece type | Length | Width | Height | Volume | Weight | Stackable
+- Rækker: "1 PKG 186.000 KG 1.536 M3 120 80 160 CM" (L B H + fælles CM)
+quantity = antal units/pcs. weightKg = vægt PR. unit (ikke linje-total, medmindre qty=1).
+"non stack" / "Stackable No" → stackable: false. "Stackable Yes" → stackable: true.
+Hvis "Gross Weight" / "Total Gross Wt" findes og linjer mangler vægt, fordel resten proportionelt efter rumfang.
+Læs tal fra billedet omhyggeligt (cm → mm *10).
 Returnér KUN valid JSON-array (ingen markdown) med objekter:
 {
   "name": string,
@@ -457,7 +663,7 @@ Returnér KUN valid JSON-array (ingen markdown) med objekter:
   "confidence": number,
   "sourceLine": string
 }
-Konvertér altid mål til millimeter. cms/cm → mm (*10). Behold navne som "Hub sektion" / "Propel".`
+Konvertér altid mål til millimeter. cms/cm → mm (*10). Behold navne som "Hub sektion" / "Propel" / "Collies".`
 
 function parseModelJson(content: string): ScannedCargoDraft[] {
   const cleaned = content
@@ -492,7 +698,23 @@ function parseModelJson(content: string): ScannedCargoDraft[] {
 async function scanWithOpenAI(
   text: string,
   apiKey: string,
+  image?: ScanImageInput | null,
 ): Promise<ScannedCargoDraft[]> {
+  const userContent: unknown[] = [
+    {
+      type: 'text',
+      text:
+        text.trim() ||
+        'Udtræk alle colli fra skærmklippet (packing list / tabel).',
+    },
+  ]
+  if (image?.dataUrl) {
+    userContent.push({
+      type: 'image_url',
+      image_url: { url: image.dataUrl },
+    })
+  }
+
   const res = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -500,11 +722,11 @@ async function scanWithOpenAI(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: 'gpt-4o-mini',
+      model: image ? 'gpt-4o-mini' : 'gpt-4o-mini',
       temperature: 0,
       messages: [
         { role: 'system', content: EXTRACT_PROMPT },
-        { role: 'user', content: text.slice(0, 12000) },
+        { role: 'user', content: image ? userContent : text.slice(0, 12000) },
       ],
     }),
   })
@@ -518,12 +740,33 @@ async function scanWithOpenAI(
 async function scanWithAnthropic(
   text: string,
   apiKey: string,
+  image?: ScanImageInput | null,
 ): Promise<ScannedCargoDraft[]> {
+  const parts: unknown[] = []
+  const parsed = image?.dataUrl ? splitDataUrl(image.dataUrl) : null
+  if (parsed) {
+    parts.push({
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: parsed.mediaType,
+        data: parsed.base64,
+      },
+    })
+  }
+  parts.push({
+    type: 'text',
+    text:
+      text.trim() ||
+      'Udtræk alle colli fra skærmklippet (packing list / tabel).',
+  })
+
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: {
       'x-api-key': apiKey,
       'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
@@ -531,7 +774,12 @@ async function scanWithAnthropic(
       max_tokens: 2000,
       temperature: 0,
       system: EXTRACT_PROMPT,
-      messages: [{ role: 'user', content: text.slice(0, 12000) }],
+      messages: [
+        {
+          role: 'user',
+          content: image ? parts : text.slice(0, 12000),
+        },
+      ],
     }),
   })
   if (!res.ok) throw new Error(`Anthropic ${res.status}`)
@@ -540,4 +788,30 @@ async function scanWithAnthropic(
   }
   const textOut = data.content?.find((c) => c.type === 'text')?.text ?? ''
   return parseModelJson(textOut)
+}
+
+/** Resize/compress screenshot for vision APIs (max edge 1600px, JPEG). */
+export async function prepareScanImage(file: Blob): Promise<ScanImageInput> {
+  if (!file.type.startsWith('image/')) {
+    throw new Error('Filen er ikke et billede')
+  }
+
+  const bitmap = await createImageBitmap(file)
+  const maxEdge = 1600
+  const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height))
+  const w = Math.max(1, Math.round(bitmap.width * scale))
+  const h = Math.max(1, Math.round(bitmap.height * scale))
+
+  const canvas = document.createElement('canvas')
+  canvas.width = w
+  canvas.height = h
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('Kunne ikke læse billedet')
+  ctx.fillStyle = '#ffffff'
+  ctx.fillRect(0, 0, w, h)
+  ctx.drawImage(bitmap, 0, 0, w, h)
+  bitmap.close()
+
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.85)
+  return { dataUrl }
 }
