@@ -83,4 +83,26 @@ No. | kg | kg | cm | cm | cm
     expect(drafts[0]!.lengthMm).toBe(3350)
     expect(drafts[0]!.widthMm).toBe(1750)
   })
+
+  it('parses Danish TMS L(m) B(m) H(m) with Koli quantity', () => {
+    const drafts = scanEmailCargoLocal(`
+Pos  Koli  Koli type  L(m)  B(m)  H(m)  Vægt (kg)
+1    2     EUR        1,20  0,80  1,00  450
+2    1     Palle      2,40  1,20  1,50  800
+3    3     Kasse      0,60  0,40  0,40  25
+`)
+    const totalQty = drafts.reduce((s, d) => s + d.quantity, 0)
+    expect(totalQty).toBe(6)
+
+    const eur = drafts.find((d) => d.lengthMm === 1200 && d.widthMm === 800)
+    expect(eur).toBeTruthy()
+    expect(eur!.heightMm).toBe(1000)
+    expect(eur!.weightKg).toBe(450)
+    expect(eur!.quantity).toBe(2)
+
+    const palle = drafts.find((d) => d.lengthMm === 2400 && d.widthMm === 1200)
+    expect(palle).toBeTruthy()
+    expect(palle!.heightMm).toBe(1500)
+    expect(palle!.weightKg).toBe(800)
+  })
 })

@@ -80,7 +80,23 @@ function inferName(line: string, index: number): string {
 
 /** Detect L/W/H unit from packing-list headers (Length / Wide / Height + cm). */
 function detectTableDimUnit(text: string): 'cm' | 'mm' | 'm' | null {
-  const head = text.slice(0, 1200)
+  const head = text.slice(0, 1600)
+  // Danish TMS / NOR: Pos | Koli | Koli type | L(m) | B(m) | H(m) | Vægt
+  if (
+    /L\s*\(\s*m\s*\)/i.test(head) &&
+    /B\s*\(\s*m\s*\)/i.test(head) &&
+    /H\s*\(\s*m\s*\)/i.test(head)
+  ) {
+    return 'm'
+  }
+  if (
+    /\bkoli\b/i.test(head) &&
+    /vægt/i.test(head) &&
+    /(?:L\s*\(\s*m\s*\)|længde)/i.test(head)
+  ) {
+    return 'm'
+  }
+
   const hasLwH =
     /(?:length|længde|læng)\b/i.test(head) &&
     /(?:wide|width|bredde|bred)\b/i.test(head) &&
@@ -101,12 +117,134 @@ function detectTableDimUnit(text: string): 'cm' | 'mm' | 'm' | null {
 
 type TableRowHit = {
   packageNo: number
+  quantity: number
   grossKg: number
   netKg: number
   l: number
   w: number
   h: number
   sourceLine: string
+}
+
+function extractLineNumbers(line: string): number[] {
+  return [...line.matchAll(/(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+[.,]?\d*)/g)].map(
+    (m) => parseNum(m[1]),
+  )
+}
+
+/**
+ * Danish TMS rows: Pos | Koli | type | L(m) | B(m) | H(m) | Vægt
+ * e.g. "1  2  EUR  1,20  0,80  1,00  450"
+ */
+function parseMeterCargoRows(text: string): TableRowHit[] {
+  const lines = text
+    .replace(/\r/g, '')
+    .split('\n')
+    .map((l) =>
+      l
+        .replace(/\|/g, ' ')
+        .replace(/\t/g, ' ')
+        .replace(/[–—]/g, '-')
+        .replace(/\s+/g, ' ')
+        .trim(),
+    )
+    .filter(Boolean)
+
+  const rows: TableRowHit[] = []
+
+  for (const line of lines) {
+    if (/^total\b|^pos\b|^koli\b/i.test(line) && !/^\d/.test(line)) continue
+    if (/^total\b/i.test(line)) continue
+
+    const nums = extractLineNumbers(line)
+    if (nums.length < 3) continue
+
+    // Find L B H as three values in meter range (truck cargo).
+    // Avoid treating Pos/Koli (e.g. 1 2 …) as dimensions — prefer fractional meters.
+    let dimAt = -1
+    let bestScore = -1
+    for (let i = 0; i <= nums.length - 3; i++) {
+      const l = nums[i]!
+      const w = nums[i + 1]!
+      const h = nums[i + 2]!
+      if (
+        !(
+          l >= 0.05 &&
+          l <= 16 &&
+          w >= 0.05 &&
+          w <= 3.5 &&
+          h >= 0.05 &&
+          h <= 4.5
+        )
+      ) {
+        continue
+      }
+      const frac =
+        (!Number.isInteger(l) ? 1 : 0) +
+        (!Number.isInteger(w) ? 1 : 0) +
+        (!Number.isInteger(h) ? 1 : 0)
+      const after = nums[i + 3]
+      let score = frac * 5 + i
+      if (after != null && after >= 1 && after <= 50000) score += 3
+      // Integer triples at the start are almost always Pos/Koli/…
+      if (i === 0 && frac === 0) score -= 8
+      if (w > l * 1.5 && l < 3) score -= 2
+      if (score > bestScore) {
+        bestScore = score
+        dimAt = i
+      }
+    }
+    if (dimAt < 0) continue
+
+    const l = nums[dimAt]!
+    const w = nums[dimAt + 1]!
+    const h = nums[dimAt + 2]!
+    const before = nums.slice(0, dimAt)
+    const after = nums.slice(dimAt + 3)
+
+    let packageNo = rows.length + 1
+    let quantity = 1
+    if (before.length >= 2 && Number.isInteger(before[0]) && Number.isInteger(before[1])) {
+      packageNo = before[0]!
+      quantity = Math.max(1, before[1]!)
+    } else if (before.length === 1 && Number.isInteger(before[0])) {
+      packageNo = before[0]!
+    }
+
+    let grossKg = 0
+    for (const n of after) {
+      if (n >= 1 && n <= 50000) {
+        grossKg = n
+        break
+      }
+    }
+    // Weight sometimes sits before dims: Pos Koli Weight L B H
+    if (!grossKg && before.length >= 3) {
+      const maybeWt = before[before.length - 1]!
+      if (maybeWt >= 5 && maybeWt <= 50000 && !Number.isInteger(l)) {
+        grossKg = maybeWt
+      }
+    }
+
+    const lMm = toMm(l, 'm')
+    const wMm = toMm(w, 'm')
+    const hMm = toMm(h, 'm')
+    if (lMm < 50 || wMm < 50 || hMm < 50) continue
+    if (lMm > 20000 || wMm > 8000 || hMm > 8000) continue
+
+    rows.push({
+      packageNo,
+      quantity,
+      grossKg,
+      netKg: 0,
+      l: lMm,
+      w: wMm,
+      h: hMm,
+      sourceLine: line.slice(0, 160),
+    })
+  }
+
+  return rows
 }
 
 /**
@@ -119,6 +257,11 @@ function parsePackingListTableRows(
   text: string,
   unit: 'cm' | 'mm' | 'm',
 ): TableRowHit[] {
+  if (unit === 'm') {
+    const meterRows = parseMeterCargoRows(text)
+    if (meterRows.length) return meterRows
+  }
+
   const lines = text
     .replace(/\r/g, '')
     .split('\n')
@@ -136,7 +279,7 @@ function parsePackingListTableRows(
 
   for (const line of lines) {
     if (/^total\b/i.test(line)) continue
-    if (/^(?:package|no\.?|gross|net\.?|length|wide|width|height|kg|cm|mm)\b/i.test(
+    if (/^(?:package|no\.?|gross|net\.?|length|wide|width|height|kg|cm|mm|pos|koli)\b/i.test(
       line,
     ) && !/^\d/.test(line))
       continue
@@ -144,9 +287,7 @@ function parsePackingListTableRows(
     if (/^(?:kg|cm|mm|m)(?:\s+(?:kg|cm|mm|m))+$/i.test(line)) continue
 
     // no, gross, net, L, W, H  OR  no, gross, L, W, H  OR  L, W, H with leading no
-    const nums = [
-      ...line.matchAll(/(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+[.,]?\d*)/g),
-    ].map((m) => parseNum(m[1]))
+    const nums = extractLineNumbers(line)
     if (nums.length < 4) continue
 
     let packageNo = 0
@@ -217,6 +358,7 @@ function parsePackingListTableRows(
 
     rows.push({
       packageNo: packageNo || rows.length + 1,
+      quantity: 1,
       grossKg: grossKg > 0 ? grossKg : 0,
       netKg: netKg > 0 ? netKg : 0,
       l: lMm,
@@ -233,6 +375,7 @@ function packingListRowsToDrafts(rows: TableRowHit[]): ScannedCargoDraft[] {
   const drafts: ScannedCargoDraft[] = []
   for (const row of rows) {
     const weightKg = row.grossKg || row.netKg || 0
+    const qty = Math.max(1, row.quantity || 1)
     const existing = drafts.find(
       (d) =>
         d.lengthMm === row.l &&
@@ -241,7 +384,7 @@ function packingListRowsToDrafts(rows: TableRowHit[]): ScannedCargoDraft[] {
         Math.abs(d.weightKg - (weightKg || d.weightKg)) < 0.05,
     )
     if (existing) {
-      existing.quantity += 1
+      existing.quantity += qty
       continue
     }
     drafts.push({
@@ -251,7 +394,7 @@ function packingListRowsToDrafts(rows: TableRowHit[]): ScannedCargoDraft[] {
       heightMm: row.h,
       weightKg:
         weightKg || guessDefaultWeight(row.l, row.w, row.h, `Pakke ${row.packageNo}`),
-      quantity: 1,
+      quantity: qty,
       allowRotation: true,
       stackable: true,
       confidence: 0.92,
@@ -853,6 +996,81 @@ function splitDataUrl(dataUrl: string): {
   return { mediaType: m[1], base64: m[2] }
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function isRateLimitError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err)
+  return /429|rate.?limit|overloaded|529|too many requests/i.test(msg)
+}
+
+function friendlyScanError(err: unknown, provider: string): Error {
+  const msg = err instanceof Error ? err.message : String(err)
+  if (isRateLimitError(err)) {
+    return new Error(
+      'AI er midlertidigt overbelastet (rate limit). Vent 20–30 sekunder og prøv igen.',
+    )
+  }
+  if (/401|403|invalid.+api.+key|authentication/i.test(msg)) {
+    return new Error(
+      `API-nøgle fejl (${provider}). Tjek VITE_OPENAI_API_KEY / VITE_ANTHROPIC_API_KEY.`,
+    )
+  }
+  if (/^OpenAI\s+\d+$/i.test(msg) || /^Anthropic\s+\d+$/i.test(msg)) {
+    return new Error(`Kunne ikke scanne via ${provider} (${msg}). Prøv igen om lidt.`)
+  }
+  return err instanceof Error ? err : new Error(msg)
+}
+
+async function withRateLimitRetry<T>(
+  fn: () => Promise<T>,
+  attempts = 3,
+): Promise<T> {
+  let last: unknown
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn()
+    } catch (err) {
+      last = err
+      if (!isRateLimitError(err) || i === attempts - 1) throw err
+      await sleep(1200 * 2 ** i + Math.random() * 400)
+    }
+  }
+  throw last
+}
+
+/** Smaller JPEG for rate-limit retries (fewer tokens / lighter request). */
+async function compressScanImage(
+  image: ScanImageInput,
+  maxEdge = 1400,
+  quality = 0.72,
+): Promise<ScanImageInput> {
+  try {
+    const res = await fetch(image.dataUrl)
+    const blob = await res.blob()
+    const bitmap = await createImageBitmap(blob)
+    const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height))
+    const w = Math.max(1, Math.round(bitmap.width * scale))
+    const h = Math.max(1, Math.round(bitmap.height * scale))
+    const canvas = document.createElement('canvas')
+    canvas.width = w
+    canvas.height = h
+    const ctx = canvas.getContext('2d')
+    if (!ctx) {
+      bitmap.close()
+      return image
+    }
+    ctx.fillStyle = '#ffffff'
+    ctx.fillRect(0, 0, w, h)
+    ctx.drawImage(bitmap, 0, 0, w, h)
+    bitmap.close()
+    return { dataUrl: canvas.toDataURL('image/jpeg', quality) }
+  } catch {
+    return image
+  }
+}
+
 export async function scanEmailCargo(
   text: string,
   options: ScanEmailOptions = {},
@@ -861,7 +1079,7 @@ export async function scanEmailCargo(
   mode: 'local' | 'openai' | 'anthropic'
 }> {
   const trimmed = text.trim()
-  const image = options.image?.dataUrl ? options.image : null
+  let image = options.image?.dataUrl ? options.image : null
 
   if (!trimmed && !image) return { drafts: [], mode: 'local' }
 
@@ -874,28 +1092,63 @@ export async function scanEmailCargo(
     )
   }
 
+  let lastImageError: unknown = null
+
+  // Prefer Anthropic for screenshots — OpenAI hits 429 often in shared TMS embeds
   if (anthropicKey) {
     try {
-      const drafts = await scanWithAnthropic(trimmed, anthropicKey, image)
+      const drafts = await withRateLimitRetry(() =>
+        scanWithAnthropic(trimmed, anthropicKey, image),
+      )
       if (drafts.length) return { drafts, mode: 'anthropic' }
+      // Empty parse: retry once with slightly compressed image
+      if (image) {
+        const lighter = await compressScanImage(image, 1600, 0.8)
+        const retry = await scanWithAnthropic(trimmed, anthropicKey, lighter)
+        if (retry.length) return { drafts: retry, mode: 'anthropic' }
+      }
     } catch (err) {
-      if (image && !openaiKey) throw err
-      // fall through
+      lastImageError = err
+      if (image && !openaiKey) throw friendlyScanError(err, 'Anthropic')
     }
   }
 
   if (openaiKey) {
     try {
-      const drafts = await scanWithOpenAI(trimmed, openaiKey, image)
+      const drafts = await withRateLimitRetry(() =>
+        scanWithOpenAI(trimmed, openaiKey, image),
+      )
       if (drafts.length) return { drafts, mode: 'openai' }
     } catch (err) {
-      if (image) throw err
-      // fall through
+      lastImageError = err
+      if (image && isRateLimitError(err)) {
+        // Rate limited: wait, shrink image, try again (and Anthropic if available)
+        await sleep(2500)
+        const lighter = await compressScanImage(image, 1280, 0.65)
+        if (anthropicKey) {
+          try {
+            const drafts = await scanWithAnthropic(trimmed, anthropicKey, lighter)
+            if (drafts.length) return { drafts, mode: 'anthropic' }
+          } catch {
+            // continue
+          }
+        }
+        try {
+          const drafts = await scanWithOpenAI(trimmed, openaiKey, lighter)
+          if (drafts.length) return { drafts, mode: 'openai' }
+        } catch (retryErr) {
+          lastImageError = retryErr
+        }
+      }
+      if (image) throw friendlyScanError(lastImageError ?? err, 'OpenAI')
     }
   }
 
   if (image) {
-    throw new Error('Kunne ikke læse skærmklippet via AI')
+    throw friendlyScanError(
+      lastImageError ?? new Error('Kunne ikke læse skærmklippet via AI'),
+      anthropicKey ? 'Anthropic' : 'OpenAI',
+    )
   }
 
   return { drafts: scanEmailCargoLocal(trimmed), mode: 'local' }
@@ -915,12 +1168,16 @@ Understøt formater som:
 - Packing list med kolonner: Package No. | Gross weight kg | Net. Weight kg | Length cm | Wide cm | Height cm
   (bemærk: "Wide" = width/bredde — IKKE "width"). Brug GROSS weight pr. pakke (ikke net).
   Eksempel-række: "1  1190  1180  335  175  170" → lengthMm=3350, widthMm=1750, heightMm=1700, weightKg=1190, quantity=1.
+- Dansk TMS-tabel: Pos | Koli | Koli type | L(m) | B(m) | H(m) | Vægt (kg)
+  Eksempel: "1  2  Palle  1,20  0,80  1,00  450" → quantity=2, lengthMm=1200, widthMm=800, heightMm=1000, weightKg=450.
+  L=længde, B=bredde, H=højde. Enheder i meter → mm (*1000).
   Spring blanke rækker og Total-rækken over. Identiske mål+vægt må gerne grupperes (højere quantity).
 
 KRITISK for enheder:
 - Kolonne "cm" / "cms" → millimeter = cm * 10. Eksempel: 335 cm = 3350 (IKKE 335) i lengthMm.
-- Returnér ALDRIG cm-tal direkte i lengthMm/widthMm/heightMm.
-- mm-kolonner: behold tallet. m-kolonner: *1000.
+- Kolonne "L(m) / B(m) / H(m)" → millimeter = m * 1000. Eksempel: 1,20 m = 1200.
+- Returnér ALDRIG cm- eller m-tal direkte i lengthMm/widthMm/heightMm.
+- mm-kolonner: behold tallet.
 
 quantity = antal units/pcs. weightKg = vægt PR. unit (ikke linje-total, medmindre qty=1).
 "non stack" / "Stackable No" → stackable: false. "Stackable Yes" → stackable: true.
@@ -995,7 +1252,7 @@ async function scanWithOpenAI(
       type: 'text',
       text:
         text.trim() ||
-        'Udtræk ALLE pakker fra skærmklippet. Typisk packing list: Package No., Gross weight (kg), Net. Weight (kg), Length (cm), Wide (cm), Height (cm). Wide = width. cm→mm (*10). Brug gross weight. Spring Total/blanke over.',
+        'Udtræk ALLE pakker fra skærmklippet. Understøt både Length/Wide/Height i cm og dansk TMS: Pos | Koli | Koli type | L(m) | B(m) | H(m) | Vægt (kg). Meter → mm (*1000). Koli = quantity. Spring Total/blanke over.',
     },
   ]
   if (image?.dataUrl) {
@@ -1012,7 +1269,8 @@ async function scanWithOpenAI(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: image ? 'gpt-4o' : 'gpt-4o-mini',
+      // mini is far less rate-limited; sufficient for packing-list grids
+      model: 'gpt-4o-mini',
       temperature: 0,
       max_tokens: image ? 12000 : 4000,
       messages: [
@@ -1021,7 +1279,13 @@ async function scanWithOpenAI(
       ],
     }),
   })
-  if (!res.ok) throw new Error(`OpenAI ${res.status}`)
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    if (res.status === 429 || /rate.?limit/i.test(body)) {
+      throw new Error('OpenAI 429')
+    }
+    throw new Error(`OpenAI ${res.status}`)
+  }
   const data = (await res.json()) as {
     choices?: { message?: { content?: string } }[]
   }
@@ -1049,7 +1313,7 @@ async function scanWithAnthropic(
     type: 'text',
     text:
       text.trim() ||
-      'Udtræk ALLE pakker fra skærmklippet. Typisk packing list: Package No., Gross weight (kg), Net. Weight (kg), Length (cm), Wide (cm), Height (cm). Wide = width. cm→mm (*10). Brug gross weight. Spring Total/blanke over. Returnér én JSON-array med alle datarækker.',
+      'Udtræk ALLE pakker fra skærmklippet. Understøt både (1) Length/Wide/Height i cm og (2) dansk TMS: Pos | Koli | Koli type | L(m) | B(m) | H(m) | Vægt (kg). L/B/H i meter → mm (*1000). Koli = quantity. Spring Total/blanke over. Returnér én JSON-array med alle datarækker.',
   })
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -1073,7 +1337,13 @@ async function scanWithAnthropic(
       ],
     }),
   })
-  if (!res.ok) throw new Error(`Anthropic ${res.status}`)
+  if (!res.ok) {
+    const body = await res.text().catch(() => '')
+    if (res.status === 429 || res.status === 529 || /rate.?limit|overloaded/i.test(body)) {
+      throw new Error(`Anthropic ${res.status}`)
+    }
+    throw new Error(`Anthropic ${res.status}`)
+  }
   const data = (await res.json()) as {
     content?: { type: string; text?: string }[]
   }
@@ -1088,15 +1358,15 @@ export async function prepareScanImage(file: Blob): Promise<ScanImageInput> {
   }
 
   const bitmap = await createImageBitmap(file)
-  // Dense packing-list grids need more pixels than 1600 — keep digits readable
-  const maxEdge = 2560
-  const minEdge = 1200
+  // Dense grids need sharpness, but huge images burn rate limits — cap at 2048
+  const maxEdge = 2048
+  const minEdge = 1100
   const longest = Math.max(bitmap.width, bitmap.height)
   const shortest = Math.min(bitmap.width, bitmap.height)
   let scale = Math.min(1, maxEdge / longest)
   // Upscale small WhatsApp/phone screenshots so OCR/vision can read cell digits
   if (shortest < minEdge) {
-    scale = Math.max(scale, Math.min(2, minEdge / shortest))
+    scale = Math.max(scale, Math.min(1.75, minEdge / shortest))
     scale = Math.min(scale, maxEdge / longest)
   }
   const w = Math.max(1, Math.round(bitmap.width * scale))
