@@ -13,3 +13,5 @@ dist-ssr
 tmp-*.pdf
 tmp-sim/
 *.tsbuildinfo
+.vercel
+.env*

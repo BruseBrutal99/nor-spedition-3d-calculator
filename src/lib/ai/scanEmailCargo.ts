@@ -1071,6 +1071,44 @@ async function compressScanImage(
   }
 }
 
+/** Prefer same-origin /api/scan-cargo (server-side Anthropic) when deployed. */
+async function scanViaBackend(
+  text: string,
+  image: ScanImageInput | null,
+): Promise<{ drafts: ScannedCargoDraft[]; mode: 'anthropic' } | null> {
+  try {
+    const res = await fetch('/api/scan-cargo', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text,
+        imageDataUrl: image?.dataUrl ?? null,
+      }),
+    })
+    if (res.status === 404 || res.status === 405) return null
+    if (res.status === 503) return null // API key not configured on host
+    const contentType = res.headers.get('content-type') ?? ''
+    // Local Vite SPA often serves index.html for unknown paths
+    if (!contentType.includes('application/json')) return null
+    if (!res.ok) {
+      const body = (await res.json().catch(() => ({}))) as { error?: string }
+      throw new Error(body.error || `Scan API ${res.status}`)
+    }
+    const data = (await res.json()) as { drafts?: ScannedCargoDraft[] }
+    const drafts = Array.isArray(data.drafts)
+      ? data.drafts.map(sanitizeDraftDims).filter(
+          (d) => d.lengthMm > 0 && d.widthMm > 0 && d.heightMm > 0,
+        )
+      : []
+    if (!drafts.length) return null
+    return { drafts, mode: 'anthropic' }
+  } catch (err) {
+    // Network / local vite without api — fall through to client keys
+    if (err instanceof TypeError) return null
+    throw err
+  }
+}
+
 export async function scanEmailCargo(
   text: string,
   options: ScanEmailOptions = {},
@@ -1083,12 +1121,25 @@ export async function scanEmailCargo(
 
   if (!trimmed && !image) return { drafts: [], mode: 'local' }
 
+  // Deployed Vercel/TMS host: server-side Anthropic (avoids browser OpenAI 429)
+  if (image || trimmed) {
+    try {
+      const viaApi = await scanViaBackend(trimmed, image)
+      if (viaApi?.drafts.length) return viaApi
+    } catch (err) {
+      // If API exists but rate-limited / failed, keep going to client keys
+      if (image && !import.meta.env.VITE_ANTHROPIC_API_KEY && !import.meta.env.VITE_OPENAI_API_KEY) {
+        throw friendlyScanError(err, 'Anthropic')
+      }
+    }
+  }
+
   const openaiKey = import.meta.env.VITE_OPENAI_API_KEY?.trim()
   const anthropicKey = import.meta.env.VITE_ANTHROPIC_API_KEY?.trim()
 
   if (image && !anthropicKey && !openaiKey) {
     throw new Error(
-      'Skærmklip kræver VITE_OPENAI_API_KEY eller VITE_ANTHROPIC_API_KEY i .env',
+      'Skærmklip kræver ANTHROPIC_API_KEY i deployment (eller VITE_ANTHROPIC_API_KEY lokalt).',
     )
   }
 
@@ -1316,14 +1367,20 @@ async function scanWithAnthropic(
       'Udtræk ALLE pakker fra skærmklippet. Understøt både (1) Length/Wide/Height i cm og (2) dansk TMS: Pos | Koli | Koli type | L(m) | B(m) | H(m) | Vægt (kg). L/B/H i meter → mm (*1000). Koli = quantity. Spring Total/blanke over. Returnér én JSON-array med alle datarækker.',
   })
 
+  const workspaceId = import.meta.env.VITE_ANTHROPIC_WORKSPACE_ID?.trim()
+  const anthHeaders: Record<string, string> = {
+    'x-api-key': apiKey,
+    'anthropic-version': '2023-06-01',
+    'anthropic-dangerous-direct-browser-access': 'true',
+    'Content-Type': 'application/json',
+  }
+  if (workspaceId) {
+    anthHeaders['anthropic-workspace-id'] = workspaceId
+  }
+
   const res = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
-    headers: {
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
-      'Content-Type': 'application/json',
-    },
+    headers: anthHeaders,
     body: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
       max_tokens: image ? 16000 : 4000,
