@@ -59,7 +59,7 @@ function inferName(line: string, index: number): string {
     const name = labeled[1].trim()
     if (
       name.length >= 2 &&
-      !/^(each|unit|units|dimensions?|total|cargo|length|width|height)$/i.test(
+      !/^(each|unit|units|dimensions?|total|cargo|length|width|wide|height)$/i.test(
         name,
       )
     ) {
@@ -74,7 +74,226 @@ function inferName(line: string, index: number): string {
   if (/\bpakke?r?\b|\bkarton|\bbox/.test(lower)) return `Pakke ${index + 1}`
   if (/\bkasse?r?\b/.test(lower)) return `Kasse ${index + 1}`
   if (/\bpcs\b|\bstk\b|\bunits?\b/.test(lower)) return `Colli ${index + 1}`
+  if (/\bpackage\b/.test(lower)) return `Pakke ${index + 1}`
   return `Colli ${index + 1}`
+}
+
+/** Detect L/W/H unit from packing-list headers (Length / Wide / Height + cm). */
+function detectTableDimUnit(text: string): 'cm' | 'mm' | 'm' | null {
+  const head = text.slice(0, 1200)
+  const hasLwH =
+    /(?:length|længde|læng)\b/i.test(head) &&
+    /(?:wide|width|bredde|bred)\b/i.test(head) &&
+    /(?:height|højde|høj)\b/i.test(head)
+  const hasPackageTable =
+    /\bpackage\b/i.test(head) &&
+    /(?:gross|net\.?\s*weight|vægt)/i.test(head) &&
+    /(?:length|wide|width|height)/i.test(head)
+
+  if (!hasLwH && !hasPackageTable) return null
+
+  if (/\bmm\b/i.test(head) && !/\bcm\b/i.test(head)) return 'mm'
+  if (/\bm\b(?!\w)/i.test(head) && !/\bcm\b/i.test(head) && !/\bmm\b/i.test(head))
+    return 'm'
+  // Default for freight packing lists: cm (this format uses "Wide" + cm)
+  return 'cm'
+}
+
+type TableRowHit = {
+  packageNo: number
+  grossKg: number
+  netKg: number
+  l: number
+  w: number
+  h: number
+  sourceLine: string
+}
+
+/**
+ * Parse rows like:
+ *   1  1190  1180  335  175  170
+ *   1 | 1190 | 1180 | 335 | 175 | 170
+ * Package | Gross | Net | Length | Wide | Height (cm)
+ */
+function parsePackingListTableRows(
+  text: string,
+  unit: 'cm' | 'mm' | 'm',
+): TableRowHit[] {
+  const lines = text
+    .replace(/\r/g, '')
+    .split('\n')
+    .map((l) =>
+      l
+        .replace(/\|/g, ' ')
+        .replace(/\t/g, ' ')
+        .replace(/[–—]/g, '-')
+        .replace(/\s+/g, ' ')
+        .trim(),
+    )
+    .filter(Boolean)
+
+  const rows: TableRowHit[] = []
+
+  for (const line of lines) {
+    if (/^total\b/i.test(line)) continue
+    if (/^(?:package|no\.?|gross|net\.?|length|wide|width|height|kg|cm|mm)\b/i.test(
+      line,
+    ) && !/^\d/.test(line))
+      continue
+    // Pure unit row: "kg kg cm cm cm"
+    if (/^(?:kg|cm|mm|m)(?:\s+(?:kg|cm|mm|m))+$/i.test(line)) continue
+
+    // no, gross, net, L, W, H  OR  no, gross, L, W, H  OR  L, W, H with leading no
+    const nums = [
+      ...line.matchAll(/(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+[.,]?\d*)/g),
+    ].map((m) => parseNum(m[1]))
+    if (nums.length < 4) continue
+
+    let packageNo = 0
+    let grossKg = 0
+    let netKg = 0
+    let l = 0
+    let w = 0
+    let h = 0
+
+    if (nums.length >= 6) {
+      // Prefer last 5 as: gross net L W H when first looks like package index
+      const [a, b, c, d, e, f] = nums.slice(0, 6)
+      if (a >= 1 && a <= 500 && Number.isInteger(a)) {
+        packageNo = a
+        grossKg = b
+        netKg = c
+        l = d
+        w = e
+        h = f
+      } else {
+        // gross net L W H (+ maybe extra)
+        grossKg = a
+        netKg = b
+        l = c
+        w = d
+        h = e
+      }
+    } else if (nums.length === 5) {
+      const [a, b, c, d, e] = nums
+      if (a >= 1 && a <= 500 && Number.isInteger(a) && b >= 1) {
+        packageNo = a
+        grossKg = b
+        l = c
+        w = d
+        h = e
+      } else {
+        grossKg = a
+        l = b
+        w = c
+        h = d
+        // e unused / maybe weight trailing
+      }
+    } else if (nums.length === 4) {
+      const [a, b, c, d] = nums
+      if (a >= 1 && a <= 500 && Number.isInteger(a)) {
+        packageNo = a
+        l = b
+        w = c
+        h = d
+      } else {
+        l = a
+        w = b
+        h = c
+        grossKg = d
+      }
+    }
+
+    if (![l, w, h].every((n) => Number.isFinite(n) && n > 0)) continue
+
+    // Sanity: dims in declared unit
+    const lMm = toMm(l, unit)
+    const wMm = toMm(w, unit)
+    const hMm = toMm(h, unit)
+    if (lMm < 50 || wMm < 50 || hMm < 50) continue
+    if (lMm > 20000 || wMm > 8000 || hMm > 8000) continue
+    // Package index shouldn't be confused with a dimension row
+    if (packageNo > 0 && packageNo === l && w < 10) continue
+
+    rows.push({
+      packageNo: packageNo || rows.length + 1,
+      grossKg: grossKg > 0 ? grossKg : 0,
+      netKg: netKg > 0 ? netKg : 0,
+      l: lMm,
+      w: wMm,
+      h: hMm,
+      sourceLine: line.slice(0, 160),
+    })
+  }
+
+  return rows
+}
+
+function packingListRowsToDrafts(rows: TableRowHit[]): ScannedCargoDraft[] {
+  const drafts: ScannedCargoDraft[] = []
+  for (const row of rows) {
+    const weightKg = row.grossKg || row.netKg || 0
+    const existing = drafts.find(
+      (d) =>
+        d.lengthMm === row.l &&
+        d.widthMm === row.w &&
+        d.heightMm === row.h &&
+        Math.abs(d.weightKg - (weightKg || d.weightKg)) < 0.05,
+    )
+    if (existing) {
+      existing.quantity += 1
+      continue
+    }
+    drafts.push({
+      name: `Pakke ${row.packageNo}`,
+      lengthMm: row.l,
+      widthMm: row.w,
+      heightMm: row.h,
+      weightKg:
+        weightKg || guessDefaultWeight(row.l, row.w, row.h, `Pakke ${row.packageNo}`),
+      quantity: 1,
+      allowRotation: true,
+      stackable: true,
+      confidence: 0.92,
+      sourceLine: row.sourceLine,
+    })
+  }
+  // Rename grouped lines more cleanly
+  return drafts.map((d, i) => ({
+    ...d,
+    name: d.quantity > 1 ? `Pakke (${d.quantity} ens)` : `Pakke ${i + 1}`,
+  }))
+}
+
+/**
+ * AI often returns cm values in *Mm fields (335 instead of 3350).
+ * Fix via density / magnitude heuristics.
+ */
+function sanitizeDraftDims(d: ScannedCargoDraft): ScannedCargoDraft {
+  let { lengthMm: l, widthMm: w, heightMm: h, weightKg } = d
+  if (![l, w, h].every((n) => Number.isFinite(n) && n > 0)) return d
+
+  const max = Math.max(l, w, h)
+  const min = Math.min(l, w, h)
+  const volM3 = (l * w * h) / 1e9
+  const density = weightKg > 0 ? weightKg / Math.max(volM3, 1e-12) : 0
+
+  // Classic mistake: cm written as mm (20–450 range, absurd density if kg present)
+  const looksLikeCm =
+    max <= 450 &&
+    min >= 10 &&
+    (density > 2000 || (weightKg >= 20 && max <= 400) || (weightKg <= 0 && max <= 400))
+
+  if (looksLikeCm) {
+    l = Math.round(l * 10)
+    w = Math.round(w * 10)
+    h = Math.round(h * 10)
+  }
+
+  // Opposite rare: meters as mm (1.2, 0.8, 1.0) — skip; parseNum already handles
+
+  if (l > 20000 || w > 8000 || h > 8000) return d
+  return { ...d, lengthMm: l, widthMm: w, heightMm: h }
 }
 
 function extractQuantity(line: string): number {
@@ -237,7 +456,36 @@ function findDimensions(line: string): DimHit | null {
     ),
     /l\s*[:=]?\s*(\d+[.,]?\d*)\s*(?:mm|cms?|m)?\s*[,;\s]+b\s*[:=]?\s*(\d+[.,]?\d*)\s*(?:mm|cms?|m)?\s*[,;\s]+h\s*[:=]?\s*(\d+[.,]?\d*)\s*(mm|cms?|m)?/i,
     /længde\s*[:=]?\s*(\d+[.,]?\d*)\s*(?:mm|cms?|m)?\s*.{0,24}?bredde\s*[:=]?\s*(\d+[.,]?\d*)\s*(?:mm|cms?|m)?\s*.{0,24}?højde\s*[:=]?\s*(\d+[.,]?\d*)\s*(mm|cms?|m)?/i,
+    /(?:length|længde)\s*[:=]?\s*(\d+[.,]?\d*)\s*(?:mm|cms?|m)?\s*.{0,28}?(?:wide|width|bredde)\s*[:=]?\s*(\d+[.,]?\d*)\s*(?:mm|cms?|m)?\s*.{0,28}?(?:height|højde)\s*[:=]?\s*(\d+[.,]?\d*)\s*(mm|cms?|m)?/i,
   ]
+
+  // Trailing L W H without separators: "... 1190 1180 335 175 170" → last three are dims
+  {
+    const trailing = line.match(
+      /(?:^|\s)(\d{2,4}(?:[.,]\d+)?)\s+(\d{2,4}(?:[.,]\d+)?)\s+(\d{2,4}(?:[.,]\d+)?)\s*$/,
+    )
+    if (trailing && trailing.index != null) {
+      const before = line.slice(0, trailing.index)
+      const hasWeightContext =
+        /\d/.test(before) ||
+        /(?:kg|gross|net|package|pakke|colli)/i.test(line)
+      if (hasWeightContext) {
+        candidates.push({
+          l: parseNum(trailing[1]),
+          w: parseNum(trailing[2]),
+          h: parseNum(trailing[3]),
+          unitRaw: /\bmm\b/i.test(line)
+            ? 'mm'
+            : /\bcm\b/i.test(line)
+              ? 'cm'
+              : undefined,
+          index: trailing.index,
+          length: trailing[0].length,
+          perAxis: false,
+        })
+      }
+    }
+  }
 
   for (const re of simplePatterns) {
     const m = line.match(re)
@@ -423,6 +671,22 @@ export function scanEmailCargoLocal(text: string): ScannedCargoDraft[] {
     .replace(/\t/g, ' ')
     .replace(/[–—]/g, '-')
 
+  // Dedicated packing-list table: Package | Gross | Net | Length | Wide | Height
+  const tableUnit = detectTableDimUnit(normalized)
+  if (tableUnit) {
+    const tableRows = parsePackingListTableRows(normalized, tableUnit)
+    if (tableRows.length >= 2) {
+      const fromTable = packingListRowsToDrafts(tableRows)
+      if (fromTable.length) {
+        const totalKg = extractTotalGrossWeightKg(normalized)
+        if (totalKg && fromTable.some((d) => !/\d[.,\d]*\s*kg/i.test(d.sourceLine) && d.weightKg <= 0)) {
+          return distributeTotalWeight(fromTable, totalKg)
+        }
+        return fromTable.map(sanitizeDraftDims)
+      }
+    }
+  }
+
   const rawLines = normalized
     .split('\n')
     .map((l) => l.trim())
@@ -537,11 +801,12 @@ export function scanEmailCargoLocal(text: string): ScannedCargoDraft[] {
   }
 
   const totalKg = extractTotalGrossWeightKg(normalized)
-  if (totalKg && drafts.length) {
-    return distributeTotalWeight(drafts, totalKg)
+  const cleaned = drafts.map(sanitizeDraftDims)
+  if (totalKg && cleaned.length) {
+    return distributeTotalWeight(cleaned, totalKg)
   }
 
-  return drafts
+  return cleaned
 }
 
 function guessDefaultWeight(
@@ -638,18 +903,30 @@ export async function scanEmailCargo(
 
 const EXTRACT_PROMPT = `Du er en logistik-assistent for NOR Spedition.
 Udtræk ALLE colli/paller/pakker/units fra mailteksten og/eller skærmklip (packing list, tabel, AWB).
+Spring ALDRIG rækker over midt i en tabel — læs fra første til sidste datarække.
+
 Understøt formater som:
 - "1 pcs 150/90/173 cms"
 - "2x 120x80x100 cm"
 - "L1200 B800 H1000"
 - "Hub sektion: 2 units" + "Each unit: 1550 x 1720 x 860 mm (LWH) / 7200kg"
-- "Propel: 20 units" + "Each unit: 1425 x 1100 x 600 mm (LWH) / 1500kg each"
 - Tabeller: Pieces | Piece type | Length | Width | Height | Volume | Weight | Stackable
 - Rækker: "1 PKG 186.000 KG 1.536 M3 120 80 160 CM" (L B H + fælles CM)
+- Packing list med kolonner: Package No. | Gross weight kg | Net. Weight kg | Length cm | Wide cm | Height cm
+  (bemærk: "Wide" = width/bredde — IKKE "width"). Brug GROSS weight pr. pakke (ikke net).
+  Eksempel-række: "1  1190  1180  335  175  170" → lengthMm=3350, widthMm=1750, heightMm=1700, weightKg=1190, quantity=1.
+  Spring blanke rækker og Total-rækken over. Identiske mål+vægt må gerne grupperes (højere quantity).
+
+KRITISK for enheder:
+- Kolonne "cm" / "cms" → millimeter = cm * 10. Eksempel: 335 cm = 3350 (IKKE 335) i lengthMm.
+- Returnér ALDRIG cm-tal direkte i lengthMm/widthMm/heightMm.
+- mm-kolonner: behold tallet. m-kolonner: *1000.
+
 quantity = antal units/pcs. weightKg = vægt PR. unit (ikke linje-total, medmindre qty=1).
 "non stack" / "Stackable No" → stackable: false. "Stackable Yes" → stackable: true.
 Hvis "Gross Weight" / "Total Gross Wt" findes og linjer mangler vægt, fordel resten proportionelt efter rumfang.
-Læs tal fra billedet omhyggeligt (cm → mm *10).
+Læs hvert tal fra billedet omhyggeligt — forveksle ikke 6/8, 1/7, 3/5, 0/6.
+
 Returnér KUN valid JSON-array (ingen markdown) med objekter:
 {
   "name": string,
@@ -663,7 +940,7 @@ Returnér KUN valid JSON-array (ingen markdown) med objekter:
   "confidence": number,
   "sourceLine": string
 }
-Konvertér altid mål til millimeter. cms/cm → mm (*10). Behold navne som "Hub sektion" / "Propel" / "Collies".`
+Konvertér altid mål til millimeter. Behold navne som "Hub sektion" / "Propel" / "Collies" / "Pakke N".`
 
 function parseModelJson(content: string): ScannedCargoDraft[] {
   const cleaned = content
@@ -679,18 +956,31 @@ function parseModelJson(content: string): ScannedCargoDraft[] {
   return arr
     .map((row) => {
       const r = row as Record<string, unknown>
-      return {
+      // Some models return cm fields instead of mm — accept both
+      const lengthMm = Number(r.lengthMm ?? r.lengthCm ?? r.length)
+      const widthMm = Number(r.widthMm ?? r.widthCm ?? r.width ?? r.wideMm ?? r.wide)
+      const heightMm = Number(r.heightMm ?? r.heightCm ?? r.height)
+      const lengthIsCm =
+        r.lengthCm != null ||
+        r.lengthMm == null && (r.length != null || r.length_cm != null)
+      const raw: ScannedCargoDraft = {
         name: String(r.name ?? 'Gods'),
-        lengthMm: Math.round(Number(r.lengthMm) || 0),
-        widthMm: Math.round(Number(r.widthMm) || 0),
-        heightMm: Math.round(Number(r.heightMm) || 0),
-        weightKg: Number(r.weightKg) || 0,
+        lengthMm: Math.round(lengthMm || 0),
+        widthMm: Math.round(widthMm || 0),
+        heightMm: Math.round(heightMm || 0),
+        weightKg: Number(r.weightKg ?? r.grossWeightKg ?? r.gross_kg) || 0,
         quantity: Math.max(1, Math.round(Number(r.quantity) || 1)),
         allowRotation: r.allowRotation !== false,
         stackable: r.stackable !== false,
         confidence: Math.min(1, Number(r.confidence) || 0.85),
         sourceLine: String(r.sourceLine ?? '').slice(0, 160),
-      } satisfies ScannedCargoDraft
+      }
+      if (lengthIsCm && raw.lengthMm > 0 && raw.lengthMm <= 450) {
+        raw.lengthMm *= 10
+        raw.widthMm *= 10
+        raw.heightMm *= 10
+      }
+      return sanitizeDraftDims(raw)
     })
     .filter((d) => d.lengthMm > 0 && d.widthMm > 0 && d.heightMm > 0)
 }
@@ -705,13 +995,13 @@ async function scanWithOpenAI(
       type: 'text',
       text:
         text.trim() ||
-        'Udtræk alle colli fra skærmklippet (packing list / tabel).',
+        'Udtræk ALLE pakker fra skærmklippet. Typisk packing list: Package No., Gross weight (kg), Net. Weight (kg), Length (cm), Wide (cm), Height (cm). Wide = width. cm→mm (*10). Brug gross weight. Spring Total/blanke over.',
     },
   ]
   if (image?.dataUrl) {
     userContent.push({
       type: 'image_url',
-      image_url: { url: image.dataUrl },
+      image_url: { url: image.dataUrl, detail: 'high' },
     })
   }
 
@@ -722,8 +1012,9 @@ async function scanWithOpenAI(
       'Content-Type': 'application/json',
     },
     body: JSON.stringify({
-      model: image ? 'gpt-4o-mini' : 'gpt-4o-mini',
+      model: image ? 'gpt-4o' : 'gpt-4o-mini',
       temperature: 0,
+      max_tokens: image ? 12000 : 4000,
       messages: [
         { role: 'system', content: EXTRACT_PROMPT },
         { role: 'user', content: image ? userContent : text.slice(0, 12000) },
@@ -758,7 +1049,7 @@ async function scanWithAnthropic(
     type: 'text',
     text:
       text.trim() ||
-      'Udtræk alle colli fra skærmklippet (packing list / tabel).',
+      'Udtræk ALLE pakker fra skærmklippet. Typisk packing list: Package No., Gross weight (kg), Net. Weight (kg), Length (cm), Wide (cm), Height (cm). Wide = width. cm→mm (*10). Brug gross weight. Spring Total/blanke over. Returnér én JSON-array med alle datarækker.',
   })
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -771,7 +1062,7 @@ async function scanWithAnthropic(
     },
     body: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
-      max_tokens: 2000,
+      max_tokens: image ? 16000 : 4000,
       temperature: 0,
       system: EXTRACT_PROMPT,
       messages: [
@@ -790,15 +1081,24 @@ async function scanWithAnthropic(
   return parseModelJson(textOut)
 }
 
-/** Resize/compress screenshot for vision APIs (max edge 1600px, JPEG). */
+/** Resize/compress screenshot for vision APIs (sharp tables need higher res). */
 export async function prepareScanImage(file: Blob): Promise<ScanImageInput> {
   if (!file.type.startsWith('image/')) {
     throw new Error('Filen er ikke et billede')
   }
 
   const bitmap = await createImageBitmap(file)
-  const maxEdge = 1600
-  const scale = Math.min(1, maxEdge / Math.max(bitmap.width, bitmap.height))
+  // Dense packing-list grids need more pixels than 1600 — keep digits readable
+  const maxEdge = 2560
+  const minEdge = 1200
+  const longest = Math.max(bitmap.width, bitmap.height)
+  const shortest = Math.min(bitmap.width, bitmap.height)
+  let scale = Math.min(1, maxEdge / longest)
+  // Upscale small WhatsApp/phone screenshots so OCR/vision can read cell digits
+  if (shortest < minEdge) {
+    scale = Math.max(scale, Math.min(2, minEdge / shortest))
+    scale = Math.min(scale, maxEdge / longest)
+  }
   const w = Math.max(1, Math.round(bitmap.width * scale))
   const h = Math.max(1, Math.round(bitmap.height * scale))
 
@@ -809,9 +1109,11 @@ export async function prepareScanImage(file: Blob): Promise<ScanImageInput> {
   if (!ctx) throw new Error('Kunne ikke læse billedet')
   ctx.fillStyle = '#ffffff'
   ctx.fillRect(0, 0, w, h)
+  ctx.imageSmoothingEnabled = true
+  ctx.imageSmoothingQuality = 'high'
   ctx.drawImage(bitmap, 0, 0, w, h)
   bitmap.close()
 
-  const dataUrl = canvas.toDataURL('image/jpeg', 0.85)
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.92)
   return { dataUrl }
 }

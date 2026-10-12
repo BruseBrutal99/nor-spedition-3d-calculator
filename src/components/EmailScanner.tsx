@@ -104,8 +104,8 @@ export function EmailScanner({ onScanned }: Props) {
       </div>
 
       <p className="muted scanner-hint">
-        Indsæt mailtekst eller skærmklip (Ctrl+V). Resultatet vises under
-        Varelinjer.
+        Indsæt mailtekst eller skærmklip/packing list (Ctrl+V). Understøtter
+        bl.a. Length/Wide/Height i cm. Resultatet vises under Varelinjer.
       </p>
 
       <div
