@@ -1382,7 +1382,7 @@ async function scanWithAnthropic(
     method: 'POST',
     headers: anthHeaders,
     body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
+      model: 'claude-sonnet-4-6',
       max_tokens: image ? 16000 : 4000,
       temperature: 0,
       system: EXTRACT_PROMPT,
