@@ -594,42 +594,38 @@ function piecesToCargoItems(pieces: Piece[]): CargoItem[] {
   return [...map.values()]
 }
 
-/** Greedy multifit: heaviest first → lightest feasible bin (weight-balanced). */
-function partitionByWeight(
-  pieces: Piece[],
-  binCount: number,
-  maxWeightKg: number,
-): Piece[][] | null {
-  if (binCount < 1) return null
-  const sorted = [...pieces].sort((a, b) => b.weightKg - a.weightKg)
-  const bins: Piece[][] = Array.from({ length: binCount }, () => [])
-  const weights = Array.from({ length: binCount }, () => 0)
-
-  for (const piece of sorted) {
-    if (piece.weightKg > maxWeightKg + 1e-6) return null
-    let best = -1
-    for (let i = 0; i < binCount; i++) {
-      if (weights[i] + piece.weightKg > maxWeightKg + 1e-6) continue
-      if (best < 0 || weights[i] < weights[best]) best = i
-    }
-    if (best < 0) return null
-    bins[best].push(piece)
-    weights[best] += piece.weightKg
+/**
+ * Split remaining pieces into what packLoad placed vs left unplaced
+ * (matched by cargoId counts — order within each id follows remaining).
+ */
+function splitPlacedPieces(
+  remaining: Piece[],
+  result: LoadResult,
+): { placed: Piece[]; leftover: Piece[] } {
+  const placedCount = new Map<string, number>()
+  for (const p of result.placed) {
+    placedCount.set(p.cargoId, (placedCount.get(p.cargoId) ?? 0) + 1)
   }
-  return bins
-}
-
-function minVehiclesByWeight(pieces: Piece[], maxWeightKg: number): number {
-  if (!pieces.length) return 1
-  const total = pieces.reduce((s, p) => s + p.weightKg, 0)
-  const heaviest = Math.max(...pieces.map((p) => p.weightKg))
-  if (heaviest > maxWeightKg) return Infinity
-  return Math.max(1, Math.ceil(total / maxWeightKg - 1e-9))
+  const used = new Map<string, number>()
+  const placed: Piece[] = []
+  const leftover: Piece[] = []
+  for (const piece of remaining) {
+    const need = placedCount.get(piece.cargoId) ?? 0
+    const have = used.get(piece.cargoId) ?? 0
+    if (have < need) {
+      placed.push(piece)
+      used.set(piece.cargoId, have + 1)
+    } else {
+      leftover.push(piece)
+    }
+  }
+  return { placed, leftover }
 }
 
 /**
  * Plan one or more vehicles when weight/space requires it.
- * Splits pieces for even weight, then packs each truck separately.
+ * Fills Bil 1 as full as possible, then Bil 2 with overflow, etc.
+ * (Does NOT balance weight evenly across trucks.)
  */
 export function packFleet(
   items: CargoItem[],
@@ -656,8 +652,8 @@ export function packFleet(
     }
   }
 
-  const minByWeight = minVehiclesByWeight(pieces, equipment.maxWeightKg)
-  if (!Number.isFinite(minByWeight)) {
+  const heaviest = Math.max(...pieces.map((p) => p.weightKg))
+  if (heaviest > equipment.maxWeightKg + 1e-6) {
     const fail = packLoad(items, equipment, options)
     return {
       vehicleCount: 1,
@@ -667,59 +663,52 @@ export function packFleet(
     }
   }
 
-  const maxTry = Math.min(pieces.length, minByWeight + 6)
-  let best: FleetPlan | null = null
+  const vehicles: VehicleLoad[] = []
+  let remaining = pieces
+  const maxVehicles = Math.min(pieces.length, 12)
 
-  for (let n = minByWeight; n <= maxTry; n++) {
-    const bins = partitionByWeight(pieces, n, equipment.maxWeightKg)
-    if (!bins) continue
+  while (remaining.length > 0 && vehicles.length < maxVehicles) {
+    const probeItems = piecesToCargoItems(remaining)
+    const probe = packLoad(probeItems, equipment, options)
+    const { placed, leftover } = splitPlacedPieces(remaining, probe)
 
-    const vehicles: VehicleLoad[] = bins.map((bin, i) => {
-      const binItems = piecesToCargoItems(bin)
-      return {
-        index: i + 1,
-        label: `Bil ${i + 1}`,
-        items: binItems,
-        result: packLoad(binItems, equipment, options),
-      }
+    if (placed.length === 0) {
+      // Nothing fits in a fresh truck — stop with leftovers marked unplaced
+      vehicles.push({
+        index: vehicles.length + 1,
+        label: `Bil ${vehicles.length + 1}`,
+        items: probeItems,
+        result: probe,
+      })
+      break
+    }
+
+    // Re-pack only what belongs on this truck so stats/unplaced stay clean
+    const truckItems = piecesToCargoItems(placed)
+    const truckResult = packLoad(truckItems, equipment, options)
+    vehicles.push({
+      index: vehicles.length + 1,
+      label: `Bil ${vehicles.length + 1}`,
+      items: truckItems,
+      result: truckResult,
     })
 
-    const allFit = vehicles.every((v) => v.result.unplaced.length === 0)
-    const plan: FleetPlan = {
-      vehicleCount: n,
-      splitReason:
-        n > 1
-          ? totalWeightKg > equipment.maxWeightKg
-            ? `Samlet vægt ${Math.round(totalWeightKg).toLocaleString('da-DK')} kg overskrider max ${equipment.maxWeightKg.toLocaleString('da-DK')} kg pr. bil — fordelt på ${n} biler`
-            : `Kræver ${n} biler for at få plads (non-stack / mål)`
-          : null,
-      totalWeightKg,
-      vehicles,
-    }
-
-    if (allFit) return plan
-    if (
-      !best ||
-      vehicles.reduce((s, v) => s + v.result.unplaced.length, 0) <
-        best.vehicles.reduce((s, v) => s + v.result.unplaced.length, 0)
-    ) {
-      best = plan
-    }
+    if (leftover.length === 0) break
+    remaining = leftover
   }
 
-  return (
-    best ?? {
-      vehicleCount: 1,
-      splitReason: null,
-      totalWeightKg,
-      vehicles: [
-        {
-          index: 1,
-          label: 'Bil 1',
-          items,
-          result: packLoad(items, equipment, options),
-        },
-      ],
-    }
-  )
+  const n = vehicles.length
+  const splitReason =
+    n > 1
+      ? totalWeightKg > equipment.maxWeightKg
+        ? `Samlet vægt ${Math.round(totalWeightKg).toLocaleString('da-DK')} kg overskrider max ${equipment.maxWeightKg.toLocaleString('da-DK')} kg pr. bil — Bil 1 fyldt først, rest på flere biler`
+        : `Kræver ${n} biler for plads (non-stack / mål) — Bil 1 fyldt først`
+      : null
+
+  return {
+    vehicleCount: n,
+    splitReason,
+    totalWeightKg,
+    vehicles,
+  }
 }
