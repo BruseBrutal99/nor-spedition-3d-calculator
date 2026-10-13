@@ -99,10 +99,15 @@ export function vehicleToUnit(
     }
   })
 
+  const split =
+    equipment.sections && equipment.sections.length > 1
+      ? ` · ${equipment.sections.map((s) => s.name).join(' + ')}`
+      : ''
+
   return {
     index: vehicle.index,
     total: totalVehicles,
-    name: equipment.name,
+    name: `${equipment.name}${split}`,
     L: mmToCm(equipment.lengthMm),
     W: mmToCm(equipment.widthMm),
     H: mmToCm(equipment.heightMm),

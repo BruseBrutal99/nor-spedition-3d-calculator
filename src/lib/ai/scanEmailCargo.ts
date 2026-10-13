@@ -975,6 +975,8 @@ export function draftsToCargoItems(drafts: ScannedCargoDraft[]): CargoItem[] {
     allowRotation: d.allowRotation,
     stackable: d.stackable,
     color: CARGO_COLORS[i % CARGO_COLORS.length],
+    shape: 'box' as const,
+    arrangement: 'linear' as const,
   }))
 }
 

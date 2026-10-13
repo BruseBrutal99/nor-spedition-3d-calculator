@@ -1,5 +1,10 @@
 import type { Equipment, PlacedBox } from '../../types'
 import { NOR_BRAND } from '../../data/brand'
+import {
+  equipmentSpanMm,
+  getEquipmentSections,
+  sectionOriginMm,
+} from '../packer'
 
 type Pt = { x: number; y: number }
 
@@ -153,9 +158,10 @@ function drawSolidBox(
 }
 
 function fitScale(equipment: Equipment, w: number, h: number) {
-  const L = equipment.lengthMm
-  const W = equipment.widthMm
-  const H = equipment.heightMm
+  const sections = getEquipmentSections(equipment)
+  const L = equipmentSpanMm(equipment)
+  const W = Math.max(...sections.map((s) => s.widthMm))
+  const H = Math.max(...sections.map((s) => s.heightMm))
   const cos = Math.sqrt(3) / 2
   const sin = 0.5
   const corners: [number, number, number][] = [
@@ -264,65 +270,77 @@ export function renderIsometricDataUrl(
 
   const areaY = hasTitle || hasStep ? 44 : 12
   const areaH = height - areaY - 12
+  const spanL = equipmentSpanMm(equipment)
+  const sections = getEquipmentSections(equipment)
   const fit = fitScale(equipment, width, areaH)
-  const project = makeProject(
-    equipment.lengthMm,
-    fit.scale,
-    fit.ox,
-    areaY + fit.oy,
-  )
+  const project = makeProject(spanL, fit.scale, fit.ox, areaY + fit.oy)
 
-  const L = equipment.lengthMm
-  const W = equipment.widthMm
-  const H = equipment.heightMm
-
-  // Floor
-  fillPoly(
-    ctx,
-    [
-      project(0, 0, 0),
-      project(L, 0, 0),
-      project(L, W, 0),
-      project(0, W, 0),
-    ],
-    'rgba(209,213,219,0.55)',
-    'rgba(156,163,175,0.5)',
-    1,
-  )
-
-  // Pier2Pier red wireframe
+  const L = spanL
+  const W = Math.max(...sections.map((s) => s.widthMm))
+  const H = Math.max(...sections.map((s) => s.heightMm))
   const wire = '#E11D48'
-  const edges: [[number, number, number], [number, number, number]][] = [
-    [[0, 0, 0], [L, 0, 0]],
-    [[L, 0, 0], [L, W, 0]],
-    [[L, W, 0], [0, W, 0]],
-    [[0, W, 0], [0, 0, 0]],
-    [[0, 0, H], [L, 0, H]],
-    [[L, 0, H], [L, W, H]],
-    [[L, W, H], [0, W, H]],
-    [[0, W, H], [0, 0, H]],
-    [[0, 0, 0], [0, 0, H]],
-    [[L, 0, 0], [L, 0, H]],
-    [[L, W, 0], [L, W, H]],
-    [[0, W, 0], [0, W, H]],
-  ]
-  ctx.strokeStyle = wire
-  ctx.lineWidth = 2.2
-  ctx.lineJoin = 'round'
-  for (const [a, b] of edges) {
-    const p1 = project(a[0], a[1], a[2])
-    const p2 = project(b[0], b[1], b[2])
-    ctx.beginPath()
-    ctx.moveTo(p1.x, p1.y)
-    ctx.lineTo(p2.x, p2.y)
-    ctx.stroke()
+
+  for (let i = 0; i < sections.length; i++) {
+    const sec = sections[i]
+    const ox = sectionOriginMm(equipment, i)
+    const sL = sec.lengthMm
+    const sW = sec.widthMm
+    const sH = sec.heightMm
+
+    fillPoly(
+      ctx,
+      [
+        project(ox, 0, 0),
+        project(ox + sL, 0, 0),
+        project(ox + sL, sW, 0),
+        project(ox, sW, 0),
+      ],
+      'rgba(209,213,219,0.55)',
+      'rgba(156,163,175,0.5)',
+      1,
+    )
+
+    const edges: [[number, number, number], [number, number, number]][] = [
+      [[ox, 0, 0], [ox + sL, 0, 0]],
+      [[ox + sL, 0, 0], [ox + sL, sW, 0]],
+      [[ox + sL, sW, 0], [ox, sW, 0]],
+      [[ox, sW, 0], [ox, 0, 0]],
+      [[ox, 0, sH], [ox + sL, 0, sH]],
+      [[ox + sL, 0, sH], [ox + sL, sW, sH]],
+      [[ox + sL, sW, sH], [ox, sW, sH]],
+      [[ox, sW, sH], [ox, 0, sH]],
+      [[ox, 0, 0], [ox, 0, sH]],
+      [[ox + sL, 0, 0], [ox + sL, 0, sH]],
+      [[ox + sL, sW, 0], [ox + sL, sW, sH]],
+      [[ox, sW, 0], [ox, sW, sH]],
+    ]
+    ctx.strokeStyle = wire
+    ctx.lineWidth = 2.2
+    ctx.lineJoin = 'round'
+    for (const [a, b] of edges) {
+      const p1 = project(a[0], a[1], a[2])
+      const p2 = project(b[0], b[1], b[2])
+      ctx.beginPath()
+      ctx.moveTo(p1.x, p1.y)
+      ctx.lineTo(p2.x, p2.y)
+      ctx.stroke()
+    }
+
+    if (sections.length > 1) {
+      ctx.fillStyle = '#6B7280'
+      ctx.font = '700 13px system-ui,Segoe UI,sans-serif'
+      const label = project(ox + sL / 2, sW + 220, 0)
+      ctx.fillText(sec.name, label.x - 24, label.y + 4)
+    }
   }
 
   // Dimension labels (cm) — Pier2Pier style along edges
   ctx.fillStyle = '#6B7280'
   ctx.font = '700 16px system-ui,Segoe UI,sans-serif'
-  const len = project(L / 2, W + 160, 0)
-  ctx.fillText(String(Math.round(L / 10)), len.x - 16, len.y + 4)
+  if (sections.length <= 1) {
+    const len = project(L / 2, W + 160, 0)
+    ctx.fillText(String(Math.round(L / 10)), len.x - 16, len.y + 4)
+  }
   const wid = project(L + 160, W / 2, 0)
   ctx.fillText(String(Math.round(W / 10)), wid.x, wid.y)
   const hei = project(L + 110, 0, H / 2)

@@ -10,7 +10,12 @@ import {
 import { BoxGeometry, EdgesGeometry } from 'three'
 import type { Equipment, PlacedBox } from '../types'
 import { LOGO_URL } from '../lib/logo'
-import { mmToM } from '../lib/packer'
+import {
+  equipmentSpanMm,
+  getEquipmentSections,
+  mmToM,
+  sectionOriginMm,
+} from '../lib/packer'
 
 export type SceneVehicle = {
   label: string
@@ -24,15 +29,30 @@ type Props = {
   activeIndex?: number
 }
 
-function EquipmentShell({ equipment }: { equipment: Equipment }) {
-  const L = mmToM(equipment.lengthMm)
-  const W = mmToM(equipment.widthMm)
-  const H = mmToM(equipment.heightMm)
+function DeckShell({
+  lengthMm,
+  widthMm,
+  heightMm,
+  label,
+}: {
+  lengthMm: number
+  widthMm: number
+  heightMm: number
+  label?: string
+}) {
+  const L = mmToM(lengthMm)
+  const W = mmToM(widthMm)
+  const H = mmToM(heightMm)
   const cx = L / 2
   const cy = W / 2
 
   return (
-    <group position={[-cx, 0, -cy]}>
+    <group>
+      {label ? (
+        <Html position={[cx, H + 0.22, cy]} center distanceFactor={16}>
+          <div className="scene-deck-label">{label}</div>
+        </Html>
+      ) : null}
       <mesh rotation={[-Math.PI / 2, 0, 0]} position={[cx, 0, cy]} receiveShadow>
         <planeGeometry args={[L, W]} />
         <meshStandardMaterial color="#4b5563" roughness={0.92} metalness={0.05} />
@@ -49,6 +69,32 @@ function EquipmentShell({ equipment }: { equipment: Equipment }) {
         <planeGeometry args={[W, H]} />
         <meshBasicMaterial color="#0f172a" transparent opacity={0.18} side={2} />
       </mesh>
+    </group>
+  )
+}
+
+function EquipmentShell({ equipment }: { equipment: Equipment }) {
+  const sections = getEquipmentSections(equipment)
+  const span = mmToM(equipmentSpanMm(equipment))
+  const maxW = Math.max(...sections.map((s) => s.widthMm))
+  const cy = mmToM(maxW) / 2
+  const split = sections.length > 1
+
+  return (
+    <group position={[-span / 2, 0, -cy]}>
+      {sections.map((sec, i) => (
+        <group
+          key={sec.id}
+          position={[mmToM(sectionOriginMm(equipment, i)), 0, 0]}
+        >
+          <DeckShell
+            lengthMm={sec.lengthMm}
+            widthMm={sec.widthMm}
+            heightMm={sec.heightMm}
+            label={split ? sec.name : undefined}
+          />
+        </group>
+      ))}
     </group>
   )
 }
@@ -103,13 +149,13 @@ function CargoLayer({
   placed: PlacedBox[]
   dimmed?: boolean
 }) {
-  const L = mmToM(equipment.lengthMm)
-  const W = mmToM(equipment.widthMm)
-  const cx = L / 2
-  const cy = W / 2
+  const span = mmToM(equipmentSpanMm(equipment))
+  const sections = getEquipmentSections(equipment)
+  const maxW = Math.max(...sections.map((s) => s.widthMm))
+  const cy = mmToM(maxW) / 2
 
   return (
-    <group position={[-cx, 0, -cy]}>
+    <group position={[-span / 2, 0, -cy]}>
       {placed.map((box, i) => {
         const l = mmToM(box.lengthMm)
         const w = mmToM(box.widthMm)
@@ -145,10 +191,11 @@ function TruckUnit({
   vehicle: SceneVehicle
   active: boolean
 }) {
-  const H = mmToM(equipment.heightMm)
+  const sections = getEquipmentSections(equipment)
+  const H = mmToM(Math.max(...sections.map((s) => s.heightMm)))
   return (
     <group>
-      <Html position={[0, H + 0.35, 0]} center distanceFactor={14}>
+      <Html position={[0, H + 0.55, 0]} center distanceFactor={14}>
         <div className={active ? 'scene-truck-label active' : 'scene-truck-label'}>
           {vehicle.label}
         </div>
@@ -164,7 +211,8 @@ function TruckUnit({
 }
 
 export function LoadScene({ equipment, vehicles, activeIndex = 0 }: Props) {
-  const W = mmToM(equipment.widthMm)
+  const sections = getEquipmentSections(equipment)
+  const W = mmToM(Math.max(...sections.map((s) => s.widthMm)))
   const gap = W + 2.2
   const list = vehicles.length ? vehicles : [{ label: 'Bil 1', placed: [] }]
 

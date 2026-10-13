@@ -1,5 +1,11 @@
 /** Dimensions in millimeters, weight in kilograms */
 
+/** Colli geometry for manual entry / 3D preview */
+export type CargoShape = 'box' | 'pipe' | 'barrel'
+
+/** How multiple units of the same line are laid on the trailer floor */
+export type CargoArrangement = 'linear' | 'grid' | 'nested'
+
 export type CargoItem = {
   id: string
   name: string
@@ -13,16 +19,37 @@ export type CargoItem = {
   /** Allow stacking other items on top */
   stackable: boolean
   color: string
+  /** Default box — pipe/barrel use diameter in width/height */
+  shape?: CargoShape
+  /** Floor arrangement preference (pipes/tønder) */
+  arrangement?: CargoArrangement
+}
+
+/** One separate deck on split equipment (e.g. forvogn + trailer) */
+export type EquipmentSection = {
+  id: string
+  name: string
+  lengthMm: number
+  widthMm: number
+  heightMm: number
 }
 
 export type Equipment = {
   id: string
   name: string
   category: 'truck' | 'trailer' | 'container'
+  /** Total usable deck length (sum of sections when split) */
   lengthMm: number
   widthMm: number
   heightMm: number
   maxWeightKg: number
+  /**
+   * Separate lad that cannot be spanned by cargo.
+   * When set, packer fills each section in order (e.g. forvogn → trailer).
+   */
+  sections?: EquipmentSection[]
+  /** Visual gap between sections in 3D/PDF (mm). Default 1800. */
+  sectionGapMm?: number
 }
 
 export type PlacedBox = {
@@ -34,6 +61,7 @@ export type PlacedBox = {
    * +X toward the door (bagerst) — load low X first.
    * +Y toward the right side.
    * +Z up.
+   * For split equipment, X is world-space including gaps between sections.
    */
   x: number
   y: number
@@ -44,6 +72,8 @@ export type PlacedBox = {
   weightKg: number
   color: string
   itemIndex: number
+  /** Section id when packed on split equipment (modulvogntog) */
+  sectionId?: string
 }
 
 export type LoadResult = {

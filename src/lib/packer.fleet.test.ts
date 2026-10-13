@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import { EQUIPMENT_PRESETS } from '../data/equipment'
 import type { CargoItem } from '../types'
-import { packFleet } from './packer'
+import { packFleet, packLoad, sectionOriginMm } from './packer'
 
 const TRAILER =
   EQUIPMENT_PRESETS.find((p) => p.id === 'trailer-13.6-240-265') ??
   EQUIPMENT_PRESETS[1]
+
+const MODUL =
+  EQUIPMENT_PRESETS.find((p) => p.id === 'modulvogntog-25.25')!
 
 function item(
   i: number,
@@ -84,5 +87,47 @@ describe('packFleet fill-first (non-stack)', () => {
     expect(fleet.vehicleCount).toBe(1)
     expect(fleet.vehicles[0]!.result.placed.length).toBe(3)
     expect(fleet.splitReason).toBeNull()
+  })
+})
+
+describe('modulvogntog split decks', () => {
+  it('has forvogn + trailer sections and 42 t payload', () => {
+    expect(MODUL.sections?.map((s) => s.id)).toEqual(['forvogn', 'trailer'])
+    expect(MODUL.sections?.[0]?.lengthMm).toBe(6800)
+    expect(MODUL.sections?.[1]?.lengthMm).toBe(13600)
+    expect(MODUL.maxWeightKg).toBe(42000)
+    expect(MODUL.lengthMm).toBe(20400)
+  })
+
+  it('places long cargo on trailer, not across the coupling gap', () => {
+    const long: CargoItem = {
+      id: 'long',
+      name: 'Lang kasse',
+      lengthMm: 8000,
+      widthMm: 1200,
+      heightMm: 1200,
+      weightKg: 500,
+      quantity: 1,
+      allowRotation: false,
+      stackable: false,
+      color: '#888',
+    }
+    const result = packLoad([long], MODUL, { allowStacking: false })
+    expect(result.placed.length).toBe(1)
+    expect(result.placed[0]!.sectionId).toBe('trailer')
+    const trailerOrigin = sectionOriginMm(MODUL, 1)
+    expect(result.placed[0]!.x).toBeGreaterThanOrEqual(trailerOrigin - 0.5)
+    // Must not sit in the gap between forvogn end and trailer start
+    const forvognEnd = MODUL.sections![0]!.lengthMm
+    expect(result.placed[0]!.x).toBeGreaterThanOrEqual(trailerOrigin)
+    expect(result.placed[0]!.x).toBeGreaterThan(forvognEnd)
+  })
+
+  it('fills forvogn before trailer', () => {
+    const small = item(1, 1200, 800, 800, 200)
+    small.quantity = 4
+    const result = packLoad([small], MODUL, { allowStacking: false })
+    expect(result.placed.length).toBe(4)
+    expect(result.placed.every((p) => p.sectionId === 'forvogn')).toBe(true)
   })
 })

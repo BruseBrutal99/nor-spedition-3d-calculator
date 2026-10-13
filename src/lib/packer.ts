@@ -1,6 +1,7 @@
 import type {
   CargoItem,
   Equipment,
+  EquipmentSection,
   FleetPlan,
   LoadResult,
   PackingOptions,
@@ -10,6 +11,59 @@ import type {
 
 type Point = { x: number; y: number; z: number }
 type Size = { l: number; w: number; h: number }
+
+const DEFAULT_SECTION_GAP_MM = 1800
+
+/** Sections to pack into — single deck when equipment has no split. */
+export function getEquipmentSections(eq: Equipment): EquipmentSection[] {
+  if (eq.sections && eq.sections.length > 0) return eq.sections
+  return [
+    {
+      id: 'main',
+      name: 'Lad',
+      lengthMm: eq.lengthMm,
+      widthMm: eq.widthMm,
+      heightMm: eq.heightMm,
+    },
+  ]
+}
+
+export function equipmentSectionGapMm(eq: Equipment): number {
+  return eq.sectionGapMm ?? DEFAULT_SECTION_GAP_MM
+}
+
+/** Total usable deck length (no coupling gap). */
+export function equipmentDeckLengthMm(eq: Equipment): number {
+  return getEquipmentSections(eq).reduce((s, sec) => s + sec.lengthMm, 0)
+}
+
+/** Span including visual gaps between sections (3D / PDF). */
+export function equipmentSpanMm(eq: Equipment): number {
+  const sections = getEquipmentSections(eq)
+  if (sections.length <= 1) return eq.lengthMm
+  const gap = equipmentSectionGapMm(eq)
+  return (
+    sections.reduce((s, sec) => s + sec.lengthMm, 0) +
+    gap * (sections.length - 1)
+  )
+}
+
+export function sectionOriginMm(eq: Equipment, index: number): number {
+  const sections = getEquipmentSections(eq)
+  const gap = equipmentSectionGapMm(eq)
+  let x = 0
+  for (let i = 0; i < index; i++) {
+    x += sections[i].lengthMm + gap
+  }
+  return x
+}
+
+function equipmentVolumeM3(eq: Equipment): number {
+  return getEquipmentSections(eq).reduce(
+    (s, sec) => s + (sec.lengthMm * sec.widthMm * sec.heightMm) / 1e9,
+    0,
+  )
+}
 
 type Candidate = {
   cargoId: string
@@ -229,14 +283,14 @@ function pushUnique(points: Point[], p: Point, eq: Equipment) {
 }
 
 /**
- * Extreme-point packer for truck loading.
+ * Extreme-point packer for a single continuous deck.
  * Prefers short load length (inderst) and stacks when it saves floor length.
  */
-export function packLoad(
+function packSingleDeck(
   items: CargoItem[],
   equipment: Equipment,
-  options: PackingOptions = { allowStacking: true },
-): LoadResult {
+  options: PackingOptions,
+): { placed: PlacedBox[]; unplaced: LoadResult['unplaced']; totalWeight: number } {
   const candidates = expandCargo(items)
   const stackableIds = new Set(
     items.filter((i) => i.stackable).map((i) => i.id),
@@ -269,7 +323,6 @@ export function packLoad(
       pushUnique(tryPoints, { x: 0, y: 0, z: p.z }, equipment)
     }
 
-    // Explicit stack candidates aligned to tops of placed boxes
     if (options.allowStacking) {
       for (const p of placed) {
         if (!stackableIds.has(p.cargoId)) continue
@@ -277,7 +330,6 @@ export function packLoad(
         pushUnique(tryPoints, { x: p.x, y: p.y, z: topZ }, equipment)
         pushUnique(tryPoints, { x: p.x, y: 0, z: topZ }, equipment)
         pushUnique(tryPoints, { x: 0, y: p.y, z: topZ }, equipment)
-        // Center-ish of support top for better coverage when sizes differ
         pushUnique(
           tryPoints,
           {
@@ -321,7 +373,6 @@ export function packLoad(
         const newMaxX = Math.max(currentMaxX, point.x + size.l)
         const extendsLength = Math.max(0, point.x + size.l - currentMaxX)
 
-        // Lower is better: keep load short (fill width before stretching toward door)
         const stackBonus =
           options.allowStacking && point.z > 0.5 ? 80 : 0
         const score =
@@ -380,27 +431,56 @@ export function packLoad(
     }
     addExtremePoints(points, box, equipment)
 
-    // Prefer lower + inderst points next
     points.sort((a, b) => a.x - b.x || a.z - b.z || a.y - b.y)
     if (points.length > 600) points.length = 600
   }
 
-  const usedVolumeM3 =
-    placed.reduce((s, p) => s + p.lengthMm * p.widthMm * p.heightMm, 0) /
-    1e9
-  const totalVolumeM3 =
-    (equipment.lengthMm * equipment.widthMm * equipment.heightMm) / 1e9
+  return { placed, unplaced, totalWeight }
+}
 
-  const physicalFloorMm = placed.length
-    ? Math.max(...placed.map((p) => p.x + p.lengthMm))
-    : 0
+/** Physical floor length per section summed (gap between decks is not loadable). */
+function physicalFloorAcrossSections(
+  placed: PlacedBox[],
+  equipment: Equipment,
+): number {
+  const sections = getEquipmentSections(equipment)
+  if (sections.length <= 1) {
+    return placed.length
+      ? Math.max(...placed.map((p) => p.x + p.lengthMm))
+      : 0
+  }
+  let sum = 0
+  for (let i = 0; i < sections.length; i++) {
+    const origin = sectionOriginMm(equipment, i)
+    const end = origin + sections[i].lengthMm
+    const inSection = placed.filter(
+      (p) => p.x >= origin - 0.5 && p.x + p.lengthMm <= end + 0.5,
+    )
+    if (inSection.length) {
+      sum += Math.max(...inSection.map((p) => p.x + p.lengthMm - origin))
+    }
+  }
+  return sum
+}
+
+function finalizeLoadResult(
+  placed: PlacedBox[],
+  unplaced: LoadResult['unplaced'],
+  equipment: Equipment,
+  totalWeight: number,
+  allowAxleBalance: boolean,
+): LoadResult {
+  const usedVolumeM3 =
+    placed.reduce((s, p) => s + p.lengthMm * p.widthMm * p.heightMm, 0) / 1e9
+  const totalVolumeM3 = equipmentVolumeM3(equipment)
+  const deckMm = equipmentDeckLengthMm(equipment)
+  const physicalFloorMm = physicalFloorAcrossSections(placed, equipment)
   const physicalLoadingMeters = physicalFloorMm / 1000
-  const trailerM = equipment.lengthMm / 1000
+  const trailerM = deckMm / 1000
   const weightRatio =
     equipment.maxWeightKg > 0 ? totalWeight / equipment.maxWeightKg : 0
   const weightLoadingMeters = weightRatio * trailerM
 
-  // Chargeable LDM: weight first, then space. Full trailer when weight fills it.
   let loadingMeters = Math.max(physicalLoadingMeters, weightLoadingMeters)
   if (weightRatio >= 0.9) {
     loadingMeters = trailerM
@@ -409,15 +489,17 @@ export function packLoad(
 
   const chargeableFloorMm = Math.round(loadingMeters * 1000)
   const balanced =
-    chargeableFloorMm > physicalFloorMm + 50
+    allowAxleBalance && chargeableFloorMm > physicalFloorMm + 50
       ? redistributeForAxleBalance(placed, chargeableFloorMm)
       : placed
 
-  const floorLengthMm = balanced.length
-    ? Math.max(...balanced.map((p) => p.x + p.lengthMm))
-    : 0
-  const floorPercent =
-    equipment.lengthMm > 0 ? (loadingMeters / trailerM) * 100 : 0
+  const floorLengthMm = allowAxleBalance
+    ? balanced.length
+      ? Math.max(...balanced.map((p) => p.x + p.lengthMm))
+      : 0
+    : physicalFloorMm
+
+  const floorPercent = deckMm > 0 ? (loadingMeters / trailerM) * 100 : 0
 
   return {
     placed: balanced,
@@ -429,12 +511,108 @@ export function packLoad(
     maxWeightKg: equipment.maxWeightKg,
     weightPercent: weightRatio * 100,
     floorLengthMm: Math.max(floorLengthMm, chargeableFloorMm),
-    equipmentLengthMm: equipment.lengthMm,
+    equipmentLengthMm: deckMm,
     loadingMeters,
     physicalLoadingMeters,
     weightLoadingMeters,
     floorPercent,
   }
+}
+
+/**
+ * Extreme-point packer for truck loading.
+ * Split equipment (modulvogntog) fills forvogn first, then trailer —
+ * cargo never spans the coupling gap.
+ */
+export function packLoad(
+  items: CargoItem[],
+  equipment: Equipment,
+  options: PackingOptions = { allowStacking: true },
+): LoadResult {
+  const sections = getEquipmentSections(equipment)
+
+  if (sections.length <= 1) {
+    const { placed, unplaced, totalWeight } = packSingleDeck(
+      items,
+      equipment,
+      options,
+    )
+    return finalizeLoadResult(
+      placed,
+      unplaced,
+      equipment,
+      totalWeight,
+      true,
+    )
+  }
+
+  // Fill each lad in order; leftover goes to the next section.
+  let remaining = expandToPieces(items)
+  const allPlaced: PlacedBox[] = []
+  let usedWeight = 0
+
+  for (let si = 0; si < sections.length; si++) {
+    const section = sections[si]
+    const weightLeft = equipment.maxWeightKg - usedWeight
+    if (!remaining.length || weightLeft <= 0) break
+
+    const sectionEq: Equipment = {
+      id: section.id,
+      name: section.name,
+      category: equipment.category,
+      lengthMm: section.lengthMm,
+      widthMm: section.widthMm,
+      heightMm: section.heightMm,
+      maxWeightKg: weightLeft,
+    }
+
+    const cargo = piecesToCargoItems(remaining)
+    const deck = packSingleDeck(cargo, sectionEq, options)
+    const { leftover } = splitPlacedPieces(remaining, {
+      placed: deck.placed,
+      unplaced: deck.unplaced,
+      usedVolumeM3: 0,
+      totalVolumeM3: 0,
+      fillPercent: 0,
+      totalWeightKg: deck.totalWeight,
+      maxWeightKg: weightLeft,
+      weightPercent: 0,
+      floorLengthMm: 0,
+      equipmentLengthMm: section.lengthMm,
+      loadingMeters: 0,
+      physicalLoadingMeters: 0,
+      weightLoadingMeters: 0,
+      floorPercent: 0,
+    })
+
+    const origin = sectionOriginMm(equipment, si)
+    for (const box of deck.placed) {
+      allPlaced.push({
+        ...box,
+        x: box.x + origin,
+        sectionId: section.id,
+      })
+    }
+    usedWeight += deck.totalWeight
+    remaining = leftover
+  }
+
+  const unplaced: LoadResult['unplaced'] = remaining.map((p) => ({
+    cargoId: p.cargoId,
+    name: `${p.name} #${p.itemIndex}`,
+    reason:
+      usedWeight >= equipment.maxWeightKg - 1e-6
+        ? 'Vægtgrænse overskredet'
+        : 'Ikke plads i forvogn/trailer',
+  }))
+
+  return finalizeLoadResult(
+    allPlaced,
+    unplaced,
+    equipment,
+    usedWeight,
+    false,
+  )
 }
 
 /**

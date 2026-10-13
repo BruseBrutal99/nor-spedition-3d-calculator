@@ -1,14 +1,23 @@
 import { useMemo, useState } from 'react'
+import { CargoEntry } from './components/CargoEntry'
 import { CargoLines } from './components/CargoLines'
-import { EmailScanner } from './components/EmailScanner'
 import { EquipmentPicker } from './components/EquipmentPicker'
 import { ExportPanel } from './components/ExportPanel'
+import { InquiryPanel } from './components/InquiryPanel'
 import { LoadScene } from './components/LoadScene'
 import { ResultStats } from './components/ResultStats'
 import { EQUIPMENT_PRESETS } from './data/equipment'
 import { LOGO_URL } from './lib/logo'
 import { formatLadmeter, packFleet } from './lib/packer'
 import type { CargoItem, Equipment, FleetPlan } from './types'
+
+const WISH_MAIL =
+  'mailto:mbk@norspedition.dk?subject=' +
+  encodeURIComponent('Ønske til 3D Load Calculator') +
+  '&body=' +
+  encodeURIComponent(
+    'Hej Mathias\n\nJeg ønsker følgende opdatering til 3D Load Calculator:\n\n-\n\nVenlig hilsen\n',
+  )
 
 function isEmbedMode(): boolean {
   if (typeof window === 'undefined') return false
@@ -48,6 +57,10 @@ export default function App() {
     if (next.length && next.every((i) => !i.stackable)) {
       setAllowStacking(false)
     }
+  }
+
+  const addCargoItem = (item: CargoItem) => {
+    setCargo([...items, item])
   }
 
   const calculate = () => {
@@ -93,18 +106,27 @@ export default function App() {
                 Velkommen til Nors 3D Load calculator
               </p>
             </div>
-            <button
-              type="button"
-              className="btn btn-primary"
-              disabled={!canCalculate}
-              onClick={calculate}
-            >
-              Beregn lastplan
-            </button>
+            <div className="page-header-actions">
+              <a className="btn btn-wish" href={WISH_MAIL}>
+                Ønsk opdatering
+              </a>
+              <button
+                type="button"
+                className="btn btn-primary"
+                disabled={!canCalculate}
+                onClick={calculate}
+              >
+                Beregn lastplan
+              </button>
+            </div>
           </header>
 
           <div className="workspace">
-            <EmailScanner onScanned={setCargo} />
+            <CargoEntry
+              onScanned={setCargo}
+              onAddItem={addCargoItem}
+              lineCount={items.length}
+            />
             <CargoLines items={items} onChange={setCargo} />
             <EquipmentPicker
               value={equipment}
@@ -161,7 +183,7 @@ export default function App() {
                   </>
                 ) : (
                   <div className="viewport-empty">
-                    <p>Scan gods og tryk Beregn lastplan.</p>
+                    <p>Tilføj gods og tryk Beregn lastplan.</p>
                     <p className="muted">
                       Ved vægt over max pr. bil foreslås flere biler automatisk.
                     </p>
@@ -187,6 +209,13 @@ export default function App() {
                   ? `${active?.label} af ${fleet.vehicleCount}`
                   : undefined
               }
+            />
+
+            <InquiryPanel
+              equipment={equipment}
+              result={result}
+              items={items}
+              fleet={fleet}
             />
           </div>
         </div>

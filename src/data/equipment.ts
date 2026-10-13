@@ -40,6 +40,36 @@ export const EQUIPMENT_PRESETS: Equipment[] = [
     maxWeightKg: 24000,
   },
   {
+    /**
+     * EMS 25,25 m vogntog — to separate lad (ikke ét kontinuerligt dæk):
+     * forvogn 6,80×2,40×2,60 m + trailer 13,6×2,40×2,60 m, max 42 t gods.
+     */
+    id: 'modulvogntog-25.25',
+    name: 'Modulvogntog 25,25 m (forvogn + trailer)',
+    category: 'truck',
+    lengthMm: 6800 + 13600,
+    widthMm: 2400,
+    heightMm: 2600,
+    maxWeightKg: 42000,
+    sectionGapMm: 1800,
+    sections: [
+      {
+        id: 'forvogn',
+        name: 'Forvogn',
+        lengthMm: 6800,
+        widthMm: 2400,
+        heightMm: 2600,
+      },
+      {
+        id: 'trailer',
+        name: 'Trailer 13,6 m',
+        lengthMm: 13600,
+        widthMm: 2400,
+        heightMm: 2600,
+      },
+    ],
+  },
+  {
     id: 'container-20',
     name: 'Container 20\'',
     category: 'container',
