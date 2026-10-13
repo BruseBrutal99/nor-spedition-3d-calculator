@@ -1152,12 +1152,6 @@ export async function scanEmailCargo(
         scanWithAnthropic(trimmed, anthropicKey, image),
       )
       if (drafts.length) return { drafts, mode: 'anthropic' }
-      // Empty parse: retry once with slightly compressed image
-      if (image) {
-        const lighter = await compressScanImage(image, 1600, 0.8)
-        const retry = await scanWithAnthropic(trimmed, anthropicKey, lighter)
-        if (retry.length) return { drafts: retry, mode: 'anthropic' }
-      }
     } catch (err) {
       lastImageError = err
       if (image && !openaiKey) throw friendlyScanError(err, 'Anthropic')
@@ -1205,50 +1199,17 @@ export async function scanEmailCargo(
   return { drafts: scanEmailCargoLocal(trimmed), mode: 'local' }
 }
 
-const EXTRACT_PROMPT = `Du er en logistik-assistent for NOR Spedition.
-Udtræk ALLE colli/paller/pakker/units fra mailteksten og/eller skærmklip (packing list, tabel, AWB).
-Spring ALDRIG rækker over midt i en tabel — læs fra første til sidste datarække.
+const EXTRACT_PROMPT = `Extract ALL cargo from packing list text/image. Be fast and complete.
 
-Understøt formater som:
-- "1 pcs 150/90/173 cms"
-- "2x 120x80x100 cm"
-- "L1200 B800 H1000"
-- "Hub sektion: 2 units" + "Each unit: 1550 x 1720 x 860 mm (LWH) / 7200kg"
-- Tabeller: Pieces | Piece type | Length | Width | Height | Volume | Weight | Stackable
-- Rækker: "1 PKG 186.000 KG 1.536 M3 120 80 160 CM" (L B H + fælles CM)
-- Packing list med kolonner: Package No. | Gross weight kg | Net. Weight kg | Length cm | Wide cm | Height cm
-  (bemærk: "Wide" = width/bredde — IKKE "width"). Brug GROSS weight pr. pakke (ikke net).
-  Eksempel-række: "1  1190  1180  335  175  170" → lengthMm=3350, widthMm=1750, heightMm=1700, weightKg=1190, quantity=1.
-- Dansk TMS-tabel: Pos | Koli | Koli type | L(m) | B(m) | H(m) | Vægt (kg)
-  Eksempel: "1  2  Palle  1,20  0,80  1,00  450" → quantity=2, lengthMm=1200, widthMm=800, heightMm=1000, weightKg=450.
-  L=længde, B=bredde, H=højde. Enheder i meter → mm (*1000).
-  Spring blanke rækker og Total-rækken over. Identiske mål+vægt må gerne grupperes (højere quantity).
+Formats: 120x80x100 cm; 150/90/173 cms; Package|Gross|Net|Length cm|Wide cm|Height cm (Wide=width, use GROSS);
+Pos|Koli|L(m)|B(m)|H(m)|Vægt; Hub sektion units + Each unit LxWxH mm.
 
-KRITISK for enheder:
-- Kolonne "cm" / "cms" → millimeter = cm * 10. Eksempel: 335 cm = 3350 (IKKE 335) i lengthMm.
-- Kolonne "L(m) / B(m) / H(m)" → millimeter = m * 1000. Eksempel: 1,20 m = 1200.
-- Returnér ALDRIG cm- eller m-tal direkte i lengthMm/widthMm/heightMm.
-- mm-kolonner: behold tallet.
+Return ONLY JSON array (no markdown), prefer compact keys:
+{"q":qty,"l":lengthMm,"w":widthMm,"h":heightMm,"kg":weightKg}
+(or full lengthMm/widthMm/heightMm/quantity/weightKg/name fields).
 
-quantity = antal units/pcs. weightKg = vægt PR. unit (ikke linje-total, medmindre qty=1).
-"non stack" / "Stackable No" → stackable: false. "Stackable Yes" → stackable: true.
-Hvis "Gross Weight" / "Total Gross Wt" findes og linjer mangler vægt, fordel resten proportionelt efter rumfang.
-Læs hvert tal fra billedet omhyggeligt — forveksle ikke 6/8, 1/7, 3/5, 0/6.
-
-Returnér KUN valid JSON-array (ingen markdown) med objekter:
-{
-  "name": string,
-  "lengthMm": number,
-  "widthMm": number,
-  "heightMm": number,
-  "weightKg": number,
-  "quantity": number,
-  "allowRotation": boolean,
-  "stackable": boolean,
-  "confidence": number,
-  "sourceLine": string
-}
-Konvertér altid mål til millimeter. Behold navne som "Hub sektion" / "Propel" / "Collies" / "Pakke N".`
+cm→mm (*10), m→mm (*1000). Group identical dims+kg (higher q). Skip Total/blank.
+Example: 335×175×170 cm @1190kg → {"q":1,"l":3350,"w":1750,"h":1700,"kg":1190}`
 
 function parseModelJson(content: string): ScannedCargoDraft[] {
   const cleaned = content
@@ -1262,22 +1223,26 @@ function parseModelJson(content: string): ScannedCargoDraft[] {
   const arr = JSON.parse(cleaned.slice(start, end + 1)) as unknown
   if (!Array.isArray(arr)) return []
   return arr
-    .map((row) => {
+    .map((row, i) => {
       const r = row as Record<string, unknown>
-      // Some models return cm fields instead of mm — accept both
-      const lengthMm = Number(r.lengthMm ?? r.lengthCm ?? r.length)
-      const widthMm = Number(r.widthMm ?? r.widthCm ?? r.width ?? r.wideMm ?? r.wide)
-      const heightMm = Number(r.heightMm ?? r.heightCm ?? r.height)
+      // Compact keys (q/l/w/h/kg) or full field names
+      const lengthMm = Number(r.l ?? r.lengthMm ?? r.lengthCm ?? r.length)
+      const widthMm = Number(
+        r.w ?? r.widthMm ?? r.widthCm ?? r.width ?? r.wideMm ?? r.wide,
+      )
+      const heightMm = Number(r.h ?? r.heightMm ?? r.heightCm ?? r.height)
       const lengthIsCm =
         r.lengthCm != null ||
-        r.lengthMm == null && (r.length != null || r.length_cm != null)
+        (r.lengthMm == null &&
+          r.l == null &&
+          (r.length != null || r.length_cm != null))
       const raw: ScannedCargoDraft = {
-        name: String(r.name ?? 'Gods'),
+        name: String(r.name ?? `Pakke ${i + 1}`),
         lengthMm: Math.round(lengthMm || 0),
         widthMm: Math.round(widthMm || 0),
         heightMm: Math.round(heightMm || 0),
-        weightKg: Number(r.weightKg ?? r.grossWeightKg ?? r.gross_kg) || 0,
-        quantity: Math.max(1, Math.round(Number(r.quantity) || 1)),
+        weightKg: Number(r.kg ?? r.weightKg ?? r.grossWeightKg ?? r.gross_kg) || 0,
+        quantity: Math.max(1, Math.round(Number(r.q ?? r.quantity) || 1)),
         allowRotation: r.allowRotation !== false,
         stackable: r.stackable !== false,
         confidence: Math.min(1, Number(r.confidence) || 0.85),
@@ -1323,7 +1288,7 @@ async function scanWithOpenAI(
       // mini is far less rate-limited; sufficient for packing-list grids
       model: 'gpt-4o-mini',
       temperature: 0,
-      max_tokens: image ? 12000 : 4000,
+      max_tokens: image ? 4000 : 2500,
       messages: [
         { role: 'system', content: EXTRACT_PROMPT },
         { role: 'user', content: image ? userContent : text.slice(0, 12000) },
@@ -1382,8 +1347,8 @@ async function scanWithAnthropic(
     method: 'POST',
     headers: anthHeaders,
     body: JSON.stringify({
-      model: 'claude-sonnet-4-6',
-      max_tokens: image ? 16000 : 4000,
+      model: image ? 'claude-haiku-4-5-20251001' : 'claude-haiku-4-5-20251001',
+      max_tokens: image ? 4000 : 2500,
       temperature: 0,
       system: EXTRACT_PROMPT,
       messages: [
@@ -1396,6 +1361,32 @@ async function scanWithAnthropic(
   })
   if (!res.ok) {
     const body = await res.text().catch(() => '')
+    // Fallback to Sonnet if Haiku model id is unavailable
+    if (res.status === 404 && /model/i.test(body)) {
+      const retry = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: anthHeaders,
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-6',
+          max_tokens: image ? 5000 : 2500,
+          temperature: 0,
+          system: EXTRACT_PROMPT,
+          messages: [
+            {
+              role: 'user',
+              content: image ? parts : text.slice(0, 12000),
+            },
+          ],
+        }),
+      })
+      if (!retry.ok) throw new Error(`Anthropic ${retry.status}`)
+      const retryData = (await retry.json()) as {
+        content?: { type: string; text?: string }[]
+      }
+      return parseModelJson(
+        retryData.content?.find((c) => c.type === 'text')?.text ?? '',
+      )
+    }
     if (res.status === 429 || res.status === 529 || /rate.?limit|overloaded/i.test(body)) {
       throw new Error(`Anthropic ${res.status}`)
     }
@@ -1408,22 +1399,21 @@ async function scanWithAnthropic(
   return parseModelJson(textOut)
 }
 
-/** Resize/compress screenshot for vision APIs (sharp tables need higher res). */
+/** Resize/compress screenshot for vision — keep small for speed (clear tables ~1200px). */
 export async function prepareScanImage(file: Blob): Promise<ScanImageInput> {
   if (!file.type.startsWith('image/')) {
     throw new Error('Filen er ikke et billede')
   }
 
   const bitmap = await createImageBitmap(file)
-  // Dense grids need sharpness, but huge images burn rate limits — cap at 2048
-  const maxEdge = 2048
-  const minEdge = 1100
+  // Smaller uploads = much faster Anthropic vision (1–2 min → few seconds)
+  const maxEdge = 1280
+  const minEdge = 900
   const longest = Math.max(bitmap.width, bitmap.height)
   const shortest = Math.min(bitmap.width, bitmap.height)
   let scale = Math.min(1, maxEdge / longest)
-  // Upscale small WhatsApp/phone screenshots so OCR/vision can read cell digits
   if (shortest < minEdge) {
-    scale = Math.max(scale, Math.min(1.75, minEdge / shortest))
+    scale = Math.max(scale, Math.min(1.5, minEdge / shortest))
     scale = Math.min(scale, maxEdge / longest)
   }
   const w = Math.max(1, Math.round(bitmap.width * scale))
@@ -1441,6 +1431,6 @@ export async function prepareScanImage(file: Blob): Promise<ScanImageInput> {
   ctx.drawImage(bitmap, 0, 0, w, h)
   bitmap.close()
 
-  const dataUrl = canvas.toDataURL('image/jpeg', 0.92)
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.75)
   return { dataUrl }
 }
