@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import { EQUIPMENT_PRESETS } from '../data/equipment'
 import type { CargoItem } from '../types'
-import { packFleet, packLoad, sectionOriginMm } from './packer'
+import {
+  occupancyLoadingMeters,
+  packFleet,
+  packLoad,
+  sectionOriginMm,
+} from './packer'
 
 const TRAILER =
   EQUIPMENT_PRESETS.find((p) => p.id === 'trailer-13.6-240-265') ??
@@ -129,5 +134,143 @@ describe('modulvogntog split decks', () => {
     const result = packLoad([small], MODUL, { allowStacking: false })
     expect(result.placed.length).toBe(4)
     expect(result.placed.every((p) => p.sectionId === 'forvogn')).toBe(true)
+  })
+})
+
+describe('floor rotation optimizes width', () => {
+  it('fits 17×115×154 cm non-stack on one 13,6 m trailer via 2-abreast', () => {
+    const cargo: CargoItem = {
+      id: 'colli1',
+      name: 'Colli 1',
+      lengthMm: 1150,
+      widthMm: 1540,
+      heightMm: 1300,
+      weightKg: 800,
+      quantity: 17,
+      allowRotation: false, // packer must rotate anyway (langs/bredde)
+      stackable: false,
+      color: '#3b82f6',
+    }
+    const fleet = packFleet([cargo], TRAILER, { allowStacking: false })
+    expect(fleet.vehicleCount).toBe(1)
+    expect(fleet.vehicles[0]!.result.placed.length).toBe(17)
+    expect(fleet.vehicles[0]!.result.unplaced.length).toBe(0)
+    // Must use the orientation that allows two across (w=1150)
+    const widths = new Set(
+      fleet.vehicles[0]!.result.placed.map((p) => p.widthMm),
+    )
+    expect(widths.has(1150)).toBe(true)
+  })
+})
+
+describe('occupancy LDM (reel gulvplads)', () => {
+  it('counts narrow cargo as share of width, not full length', () => {
+    // 10 m × 0,8 m on a 2,4 m wide deck → 10 × 0,8 / 2,4 ≈ 3,33 LDM
+    const placed = [
+      {
+        cargoId: 'pipe',
+        name: 'Rør',
+        x: 0,
+        y: 0,
+        z: 0,
+        lengthMm: 10000,
+        widthMm: 800,
+        heightMm: 400,
+        weightKg: 200,
+        color: '#0f0',
+        itemIndex: 1,
+      },
+    ]
+    const ldm = occupancyLoadingMeters(placed, 2400)
+    expect(ldm).toBeCloseTo((10000 * 800) / 2400 / 1000, 5)
+    expect(ldm).toBeLessThan(4)
+  })
+
+  it('does not double-count side-by-side colli on the same length', () => {
+    // Two 2 m × 1,2 m pallets side by side = full width for 2 m → 2 LDM
+    const placed = [
+      {
+        cargoId: 'a',
+        name: 'A',
+        x: 0,
+        y: 0,
+        z: 0,
+        lengthMm: 2000,
+        widthMm: 1200,
+        heightMm: 1000,
+        weightKg: 100,
+        color: '#00f',
+        itemIndex: 1,
+      },
+      {
+        cargoId: 'b',
+        name: 'B',
+        x: 0,
+        y: 1200,
+        z: 0,
+        lengthMm: 2000,
+        widthMm: 1200,
+        heightMm: 1000,
+        weightKg: 100,
+        color: '#f00',
+        itemIndex: 1,
+      },
+    ]
+    expect(occupancyLoadingMeters(placed, 2400)).toBeCloseTo(2, 5)
+  })
+
+  it('packLoad LDM follows packed floor length', () => {
+    const longNarrow: CargoItem = {
+      id: 'pipe',
+      name: 'Langt smalt',
+      lengthMm: 10000,
+      widthMm: 800,
+      heightMm: 400,
+      weightKg: 300,
+      quantity: 1,
+      allowRotation: false,
+      stackable: false,
+      color: '#0f0',
+    }
+    const result = packLoad([longNarrow], TRAILER, { allowStacking: false })
+    expect(result.placed.length).toBe(1)
+    expect(result.loadingMeters).toBeCloseTo(10, 1)
+    expect(result.floorLengthMm).toBeGreaterThanOrEqual(10000)
+  })
+})
+
+describe('dense row packing (customer 4,8 LDM case)', () => {
+  it('packs 5×80×100 + 8×70×115 on ≤5,2 LDM (target ~4,8)', () => {
+    const items: CargoItem[] = [
+      {
+        id: 'c2',
+        name: 'Colli 2',
+        lengthMm: 800,
+        widthMm: 1000,
+        heightMm: 800,
+        weightKg: 100,
+        quantity: 5,
+        allowRotation: true,
+        stackable: false,
+        color: '#3b82f6',
+      },
+      {
+        id: 'c1',
+        name: 'Colli 1',
+        lengthMm: 700,
+        widthMm: 1150,
+        heightMm: 700,
+        weightKg: 100,
+        quantity: 8,
+        allowRotation: true,
+        stackable: false,
+        color: '#ef4444',
+      },
+    ]
+    const result = packLoad(items, TRAILER, { allowStacking: false })
+    expect(result.placed.length).toBe(13)
+    expect(result.unplaced.length).toBe(0)
+    expect(result.loadingMeters).toBeLessThanOrEqual(5.2)
+    expect(result.loadingMeters).toBeLessThanOrEqual(4.85)
   })
 })

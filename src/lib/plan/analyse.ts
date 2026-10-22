@@ -38,6 +38,7 @@ export function analyse(u: PlanUnit): UnitAnalysis {
   const capacity = u.L * u.W * u.H
   const vPct = capacity > 0 ? (vol / capacity) * 100 : 0
 
+  // Floor LDM = packed extent (cab → furthest colli). Packer fills width first.
   const ldmFloor = usedLen / 100
   // Weight-limited: near full weight but little volume → charge full trailer LDM
   const weightLimited = wPct >= 85 && vPct < 50

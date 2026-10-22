@@ -75,7 +75,7 @@ export function EmailScanner({ onScanned }: Props) {
         setError(
           imageDataUrl
             ? 'Ingen colli fundet på skærmklippet.'
-            : 'Ingen dimensioner fundet. Prøv fx 3 Pall – 120X80X127.',
+            : 'Ingen dimensioner fundet. Prøv fx 4x paller, 120cm x 80cm x 150cm.',
         )
         return
       }

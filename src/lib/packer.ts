@@ -74,20 +74,34 @@ type Candidate = {
   sizes: Size[]
 }
 
+/**
+ * Floor orientations: L↔W always allowed (langs / i bredden).
+ * Height stays up — we do not tip colli on their side.
+ */
 function orientations(
   lengthMm: number,
   widthMm: number,
   heightMm: number,
-  allowRotation: boolean,
 ): Size[] {
   const base: Size[] = [{ l: lengthMm, w: widthMm, h: heightMm }]
-  if (allowRotation && lengthMm !== widthMm) {
+  if (lengthMm !== widthMm) {
     base.push({ l: widthMm, w: lengthMm, h: heightMm })
   }
   return base
 }
 
-function expandCargo(items: CargoItem[]): Candidate[] {
+function bestDensity(sizes: Size[], widthMm: number): number {
+  let best = 0
+  for (const s of sizes) {
+    if (s.w > widthMm + 0.5) continue
+    const across = Math.floor((widthMm + 0.5) / s.w)
+    if (across < 1) continue
+    best = Math.max(best, across / s.l)
+  }
+  return best
+}
+
+function expandCargo(items: CargoItem[], deckWidthMm?: number): Candidate[] {
   const out: Candidate[] = []
   for (const item of items) {
     for (let i = 0; i < item.quantity; i++) {
@@ -97,17 +111,16 @@ function expandCargo(items: CargoItem[]): Candidate[] {
         weightKg: item.weightKg,
         color: item.color,
         itemIndex: i + 1,
-        sizes: orientations(
-          item.lengthMm,
-          item.widthMm,
-          item.heightMm,
-          item.allowRotation,
-        ),
+        sizes: orientations(item.lengthMm, item.widthMm, item.heightMm),
       })
     }
   }
-  // Heavy + tall first as stable bases, then large footprint
+  // Dense floor rows first (more colli per ladmeter), then heavy/tall bases
+  const W = deckWidthMm ?? 2400
   out.sort((a, b) => {
+    const da = bestDensity(a.sizes, W)
+    const db = bestDensity(b.sizes, W)
+    if (db !== da) return db - da
     if (b.weightKg !== a.weightKg) return b.weightKg - a.weightKg
     if (b.sizes[0].h !== a.sizes[0].h) return b.sizes[0].h - a.sizes[0].h
     const ba = a.sizes[0].l * a.sizes[0].w
@@ -283,6 +296,175 @@ function pushUnique(points: Point[], p: Point, eq: Equipment) {
 }
 
 /**
+ * Floor shelf packer (non-stack): fill width in rows, then advance along length.
+ * Chooses L↔W orientation that maximises colli per ladmeter (across / length).
+ */
+function packFloorShelves(
+  items: CargoItem[],
+  equipment: Equipment,
+): { placed: PlacedBox[]; unplaced: LoadResult['unplaced']; totalWeight: number } {
+  type Piece = {
+    cargoId: string
+    name: string
+    weightKg: number
+    color: string
+    itemIndex: number
+    sizes: Size[]
+    size: Size
+  }
+
+  const pickSize = (sizes: Size[]): Size | null => {
+    let best: Size | null = null
+    let bestD = -1
+    for (const s of sizes) {
+      if (s.w > equipment.widthMm + 0.5) continue
+      if (s.l > equipment.lengthMm + 0.5) continue
+      if (s.h > equipment.heightMm + 0.5) continue
+      const across = Math.floor((equipment.widthMm + 0.5) / s.w)
+      if (across < 1) continue
+      const d = across / s.l
+      if (d > bestD + 1e-12) {
+        bestD = d
+        best = s
+      }
+    }
+    return best
+  }
+
+  const remaining: Piece[] = []
+  for (const item of items) {
+    const sizes = orientations(item.lengthMm, item.widthMm, item.heightMm)
+    for (let i = 0; i < item.quantity; i++) {
+      const size = pickSize(sizes)
+      if (!size) continue
+      remaining.push({
+        cargoId: item.id,
+        name: item.name,
+        weightKg: item.weightKg,
+        color: item.color,
+        itemIndex: i + 1,
+        sizes,
+        size,
+      })
+    }
+  }
+
+  // Keep same sizes together; deeper shelves first
+  remaining.sort(
+    (a, b) =>
+      b.size.l - a.size.l ||
+      b.size.w - a.size.w ||
+      a.cargoId.localeCompare(b.cargoId),
+  )
+
+  const placed: PlacedBox[] = []
+  const unplaced: LoadResult['unplaced'] = []
+  let totalWeight = 0
+  let shelfX = 0
+
+  const placeAt = (p: Piece, x: number, y: number, size: Size) => {
+    placed.push({
+      cargoId: p.cargoId,
+      name: p.name,
+      x,
+      y,
+      z: 0,
+      lengthMm: size.l,
+      widthMm: size.w,
+      heightMm: size.h,
+      weightKg: p.weightKg,
+      color: p.color,
+      itemIndex: p.itemIndex,
+    })
+    totalWeight += p.weightKg
+  }
+
+  while (remaining.length > 0) {
+    let openIdx = -1
+    let openDens = -1
+    for (let i = 0; i < remaining.length; i++) {
+      const p = remaining[i]!
+      if (totalWeight + p.weightKg > equipment.maxWeightKg) continue
+      if (shelfX + p.size.l > equipment.lengthMm + 0.5) {
+        // Try alternate orientation that still fits remaining length
+        let alt: Size | null = null
+        let altD = -1
+        for (const s of p.sizes) {
+          if (shelfX + s.l > equipment.lengthMm + 0.5) continue
+          if (s.w > equipment.widthMm + 0.5) continue
+          if (s.h > equipment.heightMm + 0.5) continue
+          const across = Math.floor((equipment.widthMm + 0.5) / s.w)
+          if (across < 1) continue
+          const d = across / s.l
+          if (d > altD) {
+            altD = d
+            alt = s
+          }
+        }
+        if (!alt) continue
+        p.size = alt
+      }
+      const across = Math.floor((equipment.widthMm + 0.5) / p.size.w)
+      const d = across / p.size.l
+      if (d > openDens) {
+        openDens = d
+        openIdx = i
+      }
+    }
+
+    if (openIdx < 0) {
+      for (const p of remaining) {
+        unplaced.push({
+          cargoId: p.cargoId,
+          name: `${p.name} #${p.itemIndex}`,
+          reason:
+            totalWeight + p.weightKg > equipment.maxWeightKg
+              ? 'Vægtgrænse overskredet'
+              : 'Ikke plads i udstyr',
+        })
+      }
+      break
+    }
+
+    const first = remaining.splice(openIdx, 1)[0]!
+    const shelfDepth = first.size.l
+    placeAt(first, shelfX, 0, first.size)
+    let y = first.size.w
+
+    let guard = 0
+    while (guard++ < 500 && remaining.length > 0) {
+      let bestJ = -1
+      let bestSize: Size | null = null
+      let bestKey = -Infinity
+      for (let j = 0; j < remaining.length; j++) {
+        const p = remaining[j]!
+        if (totalWeight + p.weightKg > equipment.maxWeightKg) continue
+        for (const s of p.sizes) {
+          if (s.l > shelfDepth + 0.5) continue
+          if (y + s.w > equipment.widthMm + 0.5) continue
+          if (s.h > equipment.heightMm + 0.5) continue
+          const exact = Math.abs(s.l - shelfDepth) < 0.5 ? 1e9 : 0
+          const key = exact + s.w * 1e3 + s.l
+          if (key > bestKey) {
+            bestKey = key
+            bestJ = j
+            bestSize = s
+          }
+        }
+      }
+      if (bestJ < 0 || !bestSize) break
+      const p = remaining.splice(bestJ, 1)[0]!
+      placeAt(p, shelfX, y, bestSize)
+      y += bestSize.w
+    }
+
+    shelfX += shelfDepth
+  }
+
+  return { placed, unplaced, totalWeight }
+}
+
+/**
  * Extreme-point packer for a single continuous deck.
  * Prefers short load length (inderst) and stacks when it saves floor length.
  */
@@ -291,7 +473,11 @@ function packSingleDeck(
   equipment: Equipment,
   options: PackingOptions,
 ): { placed: PlacedBox[]; unplaced: LoadResult['unplaced']; totalWeight: number } {
-  const candidates = expandCargo(items)
+  if (!options.allowStacking) {
+    return packFloorShelves(items, equipment)
+  }
+
+  const candidates = expandCargo(items, equipment.widthMm)
   const stackableIds = new Set(
     items.filter((i) => i.stackable).map((i) => i.id),
   )
@@ -372,17 +558,27 @@ function packSingleDeck(
 
         const newMaxX = Math.max(currentMaxX, point.x + size.l)
         const extendsLength = Math.max(0, point.x + size.l - currentMaxX)
+        const across = Math.max(
+          1,
+          Math.floor((equipment.widthMm + 0.5) / size.w),
+        )
+        // Effective length cost of this orientation in a full-width row
+        const mmPerItem = size.l / across
 
         const stackBonus =
           options.allowStacking && point.z > 0.5 ? 80 : 0
+
+        // Strict bottom-left: minimise X, then row length, then Y.
+        // Orientation tie-break: fewer mm of trailer per colli (2×70 beats 3×115).
         const score =
-          newMaxX * 1e3 +
-          extendsLength * 2.5e3 +
-          point.x * 40 +
-          point.y * 0.35 +
-          point.z * (options.allowStacking ? 0.02 : 50) -
-          contact * 0.08 -
-          support.supportAreaRatio * 120 -
+          point.x * 1e12 +
+          newMaxX * 1e8 +
+          extendsLength * 1e7 +
+          mmPerItem * 1e5 +
+          point.y * 1e3 +
+          point.z * (options.allowStacking ? 0.5 : 1e6) -
+          contact * 0.05 -
+          support.supportAreaRatio * 50 -
           stackBonus
 
         if (!best || score < best.score) {
@@ -438,8 +634,8 @@ function packSingleDeck(
   return { placed, unplaced, totalWeight }
 }
 
-/** Physical floor length per section summed (gap between decks is not loadable). */
-function physicalFloorAcrossSections(
+/** Furthest X extent per section summed (gap is not loadable). */
+function extentFloorAcrossSections(
   placed: PlacedBox[],
   equipment: Equipment,
 ): number {
@@ -463,6 +659,68 @@ function physicalFloorAcrossSections(
   return sum
 }
 
+/** Length of merged Y-intervals (mm). */
+function unionIntervalLength(intervals: [number, number][]): number {
+  if (!intervals.length) return 0
+  const sorted = [...intervals].sort((a, b) => a[0] - b[0])
+  let total = 0
+  let curS = sorted[0]![0]
+  let curE = sorted[0]![1]
+  for (let i = 1; i < sorted.length; i++) {
+    const [s, e] = sorted[i]!
+    if (s <= curE) {
+      curE = Math.max(curE, e)
+    } else {
+      total += curE - curS
+      curS = s
+      curE = e
+    }
+  }
+  total += curE - curS
+  return total
+}
+
+/**
+ * Union of floor footprints (mm²). Stacked items share the same footprint;
+ * side-by-side items only add the uncovered width.
+ */
+export function floorFootprintUnionMm2(placed: PlacedBox[]): number {
+  if (!placed.length) return 0
+  const xs = new Set<number>()
+  for (const p of placed) {
+    xs.add(p.x)
+    xs.add(p.x + p.lengthMm)
+  }
+  const sorted = [...xs].sort((a, b) => a - b)
+  let area = 0
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const x0 = sorted[i]!
+    const x1 = sorted[i + 1]!
+    const dx = x1 - x0
+    if (dx <= 0) continue
+    const intervals: [number, number][] = []
+    for (const p of placed) {
+      if (p.x < x1 - 0.5 && p.x + p.lengthMm > x0 + 0.5) {
+        intervals.push([p.y, p.y + p.widthMm])
+      }
+    }
+    area += dx * unionIntervalLength(intervals)
+  }
+  return area
+}
+
+/**
+ * Reel LDM from occupied floor: footprint area / deck width.
+ * A narrow item along one side only counts its share of the width.
+ */
+export function occupancyLoadingMeters(
+  placed: PlacedBox[],
+  widthMm: number,
+): number {
+  if (!placed.length || widthMm <= 0) return 0
+  return floorFootprintUnionMm2(placed) / widthMm / 1000
+}
+
 function finalizeLoadResult(
   placed: PlacedBox[],
   unplaced: LoadResult['unplaced'],
@@ -474,30 +732,35 @@ function finalizeLoadResult(
     placed.reduce((s, p) => s + p.lengthMm * p.widthMm * p.heightMm, 0) / 1e9
   const totalVolumeM3 = equipmentVolumeM3(equipment)
   const deckMm = equipmentDeckLengthMm(equipment)
-  const physicalFloorMm = physicalFloorAcrossSections(placed, equipment)
-  const physicalLoadingMeters = physicalFloorMm / 1000
+  const extentMm = extentFloorAcrossSections(placed, equipment)
+  const extentM = extentMm / 1000
   const trailerM = deckMm / 1000
   const weightRatio =
     equipment.maxWeightKg > 0 ? totalWeight / equipment.maxWeightKg : 0
   const weightLoadingMeters = weightRatio * trailerM
 
-  let loadingMeters = Math.max(physicalLoadingMeters, weightLoadingMeters)
+  // Chargeable LDM = packed floor length (after width-optimised placement).
+  let loadingMeters = Math.max(extentM, weightLoadingMeters)
   if (weightRatio >= 0.9) {
     loadingMeters = trailerM
   }
   loadingMeters = Math.min(trailerM, loadingMeters)
 
-  const chargeableFloorMm = Math.round(loadingMeters * 1000)
+  const chargeableExtentMm = Math.round(loadingMeters * 1000)
   const balanced =
-    allowAxleBalance && chargeableFloorMm > physicalFloorMm + 50
-      ? redistributeForAxleBalance(placed, chargeableFloorMm)
+    allowAxleBalance &&
+    weightLoadingMeters > extentM + 0.05 &&
+    chargeableExtentMm > extentMm + 50
+      ? redistributeForAxleBalance(placed, Math.min(chargeableExtentMm, deckMm))
       : placed
 
-  const floorLengthMm = allowAxleBalance
-    ? balanced.length
-      ? Math.max(...balanced.map((p) => p.x + p.lengthMm))
-      : 0
-    : physicalFloorMm
+  const floorLengthMm = balanced.length
+    ? Math.max(...balanced.map((p) => p.x + p.lengthMm))
+    : 0
+  const physicalLoadingMeters =
+    balanced !== placed
+      ? extentFloorAcrossSections(balanced, equipment) / 1000
+      : extentM
 
   const floorPercent = deckMm > 0 ? (loadingMeters / trailerM) * 100 : 0
 
@@ -510,7 +773,7 @@ function finalizeLoadResult(
     totalWeightKg: totalWeight,
     maxWeightKg: equipment.maxWeightKg,
     weightPercent: weightRatio * 100,
-    floorLengthMm: Math.max(floorLengthMm, chargeableFloorMm),
+    floorLengthMm,
     equipmentLengthMm: deckMm,
     loadingMeters,
     physicalLoadingMeters,

@@ -105,4 +105,36 @@ Pos  Koli  Koli type  L(m)  B(m)  H(m)  Vægt (kg)
     expect(palle!.heightMm).toBe(1500)
     expect(palle!.weightKg).toBe(800)
   })
+
+  it('parses spoken Danish: 4x paller, 300cm x 95cm x 150 cm', () => {
+    const drafts = scanEmailCargoLocal(`
+4x paller, 300cm x 95cm x 150 cm
+4x paller, 120cm x 80cm x 150cm
+`)
+    expect(drafts).toHaveLength(2)
+
+    const long = drafts.find((d) => d.lengthMm === 3000 && d.widthMm === 950)
+    expect(long).toBeTruthy()
+    expect(long!.heightMm).toBe(1500)
+    expect(long!.quantity).toBe(4)
+
+    const eur = drafts.find((d) => d.lengthMm === 1200 && d.widthMm === 800)
+    expect(eur).toBeTruthy()
+    expect(eur!.heightMm).toBe(1500)
+    expect(eur!.quantity).toBe(4)
+  })
+
+  it('parses short form: 4 pall, 300cm x 95cm x 150 cm', () => {
+    const drafts = scanEmailCargoLocal(`
+4 pall, 300cm x 95cm x 150 cm
+4 pall 120cm x 80cm x 150cm
+`)
+    expect(drafts.reduce((s, d) => s + d.quantity, 0)).toBe(8)
+    expect(drafts.some((d) => d.lengthMm === 3000 && d.widthMm === 950)).toBe(
+      true,
+    )
+    expect(drafts.some((d) => d.lengthMm === 1200 && d.widthMm === 800)).toBe(
+      true,
+    )
+  })
 })

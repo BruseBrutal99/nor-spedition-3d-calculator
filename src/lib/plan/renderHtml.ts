@@ -101,7 +101,7 @@ function renderPage(plan: Plan, u: PlanUnit, pageIndex: number, pageTotal: numbe
   const defaultNotes = [
     'Alt gods surres iht. EN 12195-1.',
     A.weightLimited
-      ? `Vægtbegrænset last: gulv brugt ${fmt(A.ldmFloor, 1)} m, opkrævet ${fmt(A.ldmCharged, 1)} LDM.`
+      ? `Vægtbegrænset last: gulv ${fmt(A.ldmFloor, 1)} m, opkrævet ${fmt(A.ldmCharged, 1)} LDM.`
       : '',
   ].filter(Boolean)
   const notes = (plan.notes?.length ? plan.notes : defaultNotes).filter(Boolean)

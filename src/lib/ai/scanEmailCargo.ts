@@ -441,8 +441,10 @@ function sanitizeDraftDims(d: ScannedCargoDraft): ScannedCargoDraft {
 
 function extractQuantity(line: string): number {
   const patterns = [
-    // "3 Pall – 120X80X127" / "17 Pall – 120X80X125" / "1 PKG …"
-    /^(\d+)\s*(?:x\s*)?(?:pkg|pack(?:s|ages)?|pall(?:e|er|es)?|collies|colli|kolli|pcs|stk|pieces?|units?|boxes|karton|pakke(?:r)?)\b/i,
+    // "4x paller" / "4 x paller," / "3 Pall – 120X80X127" / "1 PKG …"
+    /^(\d+)\s*[x×]\s*(?:pkg|pack(?:s|ages)?|pall(?:e|er|es)?|collies|colli|kolli|pcs|stk|pieces?|units?|boxes|karton|pakke(?:r)?)\b/i,
+    /^(\d+)\s*(?:pkg|pack(?:s|ages)?|pall(?:e|er|es)?|collies|colli|kolli|pcs|stk|pieces?|units?|boxes|karton|pakke(?:r)?)\b/i,
+    /(\d+)\s*[x×]\s*(?:pkg|pack(?:s|ages)?|pall(?:e|er|es)?|collies|colli|kolli|pcs|stk|pieces?|units?|boxes|karton|pakke(?:r)?)\b/i,
     /(\d+)\s*(?:units?|pcs|stk|styk|pieces?|collies|colli|kolli|pkg|pall(?:e|er)?|st\b)\b/i,
     /antal[:\s]+(\d+)/i,
     /qty[:\s]+(\d+)/i,
@@ -562,6 +564,29 @@ function findDimensions(line: string): DimHit | null {
   {
     const re = new RegExp(
       `(\\d+[.,]?\\d*)\\s*(${UNIT_GROUP})\\s+(\\d+[.,]?\\d*)\\s*(${UNIT_GROUP})\\s+(\\d+[.,]?\\d*)\\s*(${UNIT_GROUP})`,
+      'gi',
+    )
+    let m: RegExpExecArray | null
+    while ((m = re.exec(line)) !== null) {
+      candidates.push({
+        l: parseNum(m[1]),
+        w: parseNum(m[3]),
+        h: parseNum(m[5]),
+        unitL: m[2],
+        unitW: m[4],
+        unitH: m[6],
+        unitRaw: m[6],
+        index: m.index,
+        length: m[0].length,
+        perAxis: true,
+      })
+    }
+  }
+
+  // Spoken / typed: "300cm x 95cm x 150 cm" / "120 cm x 80 cm x 150cm"
+  {
+    const re = new RegExp(
+      `(\\d+[.,]?\\d*)\\s*(${UNIT_GROUP})\\s*[x×*]\\s*(\\d+[.,]?\\d*)\\s*(${UNIT_GROUP})\\s*[x×*]\\s*(\\d+[.,]?\\d*)\\s*(${UNIT_GROUP})`,
       'gi',
     )
     let m: RegExpExecArray | null
@@ -707,6 +732,9 @@ function lineLooksLikeCargo(line: string): boolean {
     ) ||
     /\d+[.,]?\d*\s*\/\s*\d+[.,]?\d*\s*\/\s*\d+/i.test(line) ||
     /\d+[.,]?\d*\s*[x×*]\s*\d+[.,]?\d*\s*[x×*]\s*\d+/i.test(line) ||
+    /\d+[.,]?\d*\s*(?:mm|cms?|m)\s*[x×*]\s*\d+[.,]?\d*\s*(?:mm|cms?|m)\s*[x×*]\s*\d+/i.test(
+      line,
+    ) ||
     /\d+[.,]?\d*\s*-\s*\d+[.,]?\d*\s*-\s*\d+/i.test(line) ||
     /\bl\s*[:=]?\s*\d/i.test(line) ||
     /længde/i.test(line) ||

@@ -85,16 +85,17 @@ export type LoadResult = {
   totalWeightKg: number
   maxWeightKg: number
   weightPercent: number
-  /** Dense physical floor length used (cab → door), mm */
+  /** Furthest floor extent cab → door (mm), not LDM */
   floorLengthMm: number
   /** Equipment internal length, mm */
   equipmentLengthMm: number
   /**
-   * Chargeable LDM (ladmeter) — max of physical floor and weight-based LDM.
+   * Chargeable LDM — packed floor length (cab → furthest colli), or weight LDM.
+   * Packer fills width side-by-side before stretching length.
    * Near/full weight capacity ⇒ full trailer LDM.
    */
   loadingMeters: number
-  /** Physical floor only, meters */
+  /** Physical packed floor length, meters */
   physicalLoadingMeters: number
   /** Weight converted to LDM: (kg/maxKg) × trailer length */
   weightLoadingMeters: number
