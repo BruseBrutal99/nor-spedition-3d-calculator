@@ -1284,7 +1284,14 @@ export async function scanEmailCargo(
 
   if (!trimmed && !image) return { drafts: [], mode: 'local' }
 
-  // Deployed Vercel/TMS host: server-side Anthropic (avoids browser OpenAI 429)
+  // Text-only packing lists: prefer local parser (EU thousands, line totals).
+  // AI often misreads "1.057 kg" / "3x … – 1.057 kg" and inflates weight → extra trucks.
+  if (trimmed && !image) {
+    const local = scanEmailCargoLocal(trimmed)
+    if (local.length) return { drafts: local, mode: 'local' }
+  }
+
+  // Screenshots / fallback: server-side Anthropic (avoids browser OpenAI 429)
   if (image || trimmed) {
     try {
       const viaApi = await scanViaBackend(trimmed, image)
@@ -1365,13 +1372,18 @@ export async function scanEmailCargo(
 const EXTRACT_PROMPT = `Extract ALL cargo from packing list text/image. Be fast and complete.
 
 Formats: 120x80x100 cm; 150/90/173 cms; Package|Gross|Net|Length cm|Wide cm|Height cm (Wide=width, use GROSS);
-Pos|Koli|L(m)|B(m)|H(m)|Vægt; Hub sektion units + Each unit LxWxH mm.
+Pos|Koli|L(m)|B(m)|H(m)|Vægt; Hub sektion units + Each unit LxWxH mm;
+Danish/ordre: "3x 120 x 80 x 105 cm – 1.057 kg" (qty × L×W×H cm – LINE TOTAL kg);
+English: "2 pallets: 0.85m high x 1.20m wide x 1.65m long".
 
 Return ONLY JSON array (no markdown), prefer compact keys:
-{"q":qty,"l":lengthMm,"w":widthMm,"h":heightMm,"kg":weightKg}
+{"q":qty,"l":lengthMm,"w":widthMm,"h":heightMm,"kg":weightKgPerPiece}
 (or full lengthMm/widthMm/heightMm/quantity/weightKg/name fields).
 
-cm→mm (*10), m→mm (*1000). Group identical dims+kg (higher q). Skip Total/blank.
+cm→mm (*10), m→mm (*1000). Danish weights use '.' as thousands: 1.057 kg = 1057, 4.608 = 4608, 19.129 = 19129.
+If weight is a LINE TOTAL for qty>1 (en-dash before kg), set kg = total/qty (per piece).
+Group identical dims+kg (higher q). Skip Ordre headers / Total / blank.
+Example: 3x 120×80×105 cm – 1.057 kg → {"q":3,"l":1200,"w":800,"h":1050,"kg":352.3}
 Example: 335×175×170 cm @1190kg → {"q":1,"l":3350,"w":1750,"h":1700,"kg":1190}`
 
 function parseModelJson(content: string): ScannedCargoDraft[] {
