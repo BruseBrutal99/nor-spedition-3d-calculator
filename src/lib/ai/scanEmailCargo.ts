@@ -33,6 +33,28 @@ function parseNum(raw: string): number {
   return Number(s.replace(',', '.'))
 }
 
+/**
+ * Danish/EU packing weights: "1.057 kg" / "4.608 kg" / "19.129 kg" use
+ * '.' as thousands separator (→ 1057 / 4608 / 19129), not decimals.
+ */
+function parseKgNum(raw: string): number {
+  const s = raw.replace(/\s/g, '')
+  if (!s) return NaN
+  // 10.079,00 / 1.875,5
+  if (/^\d{1,3}(\.\d{3})+,\d+$/.test(s)) {
+    return Number(s.replace(/\./g, '').replace(',', '.'))
+  }
+  // 1.057 / 4.608 / 19.129 — exactly 3 digits after dot → thousands
+  if (/^\d{1,3}\.\d{3}$/.test(s)) {
+    return Number(s.replace(/\./g, ''))
+  }
+  // 1.057.000
+  if (/^\d{1,3}(\.\d{3}){2,}$/.test(s)) {
+    return Number(s.replace(/\./g, ''))
+  }
+  return parseNum(s)
+}
+
 function normalizeUnit(unit: string | undefined): string | undefined {
   if (!unit) return undefined
   const u = unit.toLowerCase().replace(/\.$/, '')
@@ -68,7 +90,8 @@ function inferName(line: string, index: number): string {
   }
 
   const lower = line.toLowerCase()
-  if (/\bpall(?:e|er|es)?\b|\beur\b|\bepal\b/.test(lower)) return `Palle ${index + 1}`
+  if (/\bpallets?\b|\bpall(?:e|er|es)?\b|\beur\b|\bepal\b/.test(lower))
+    return `Palle ${index + 1}`
   if (/\bcolli\b|\bkolli\b|\bcollies\b/.test(lower)) return `Colli ${index + 1}`
   if (/\bpkg\b|\bpack(?:s|ages)?\b/.test(lower)) return `Pakke ${index + 1}`
   if (/\bpakke?r?\b|\bkarton|\bbox/.test(lower)) return `Pakke ${index + 1}`
@@ -439,13 +462,21 @@ function sanitizeDraftDims(d: ScannedCargoDraft): ScannedCargoDraft {
   return { ...d, lengthMm: l, widthMm: w, heightMm: h }
 }
 
+const QTY_UNIT =
+  'pkg|pack(?:s|ages)?|pallets?|pall(?:e|er|es)?|collies|colli|kolli|pcs|stk|pieces?|units?|boxes|karton|pakke(?:r)?'
+
 function extractQuantity(line: string): number {
   const patterns = [
-    // "4x paller" / "4 x paller," / "3 Pall – 120X80X127" / "1 PKG …"
-    /^(\d+)\s*[x×]\s*(?:pkg|pack(?:s|ages)?|pall(?:e|er|es)?|collies|colli|kolli|pcs|stk|pieces?|units?|boxes|karton|pakke(?:r)?)\b/i,
-    /^(\d+)\s*(?:pkg|pack(?:s|ages)?|pall(?:e|er|es)?|collies|colli|kolli|pcs|stk|pieces?|units?|boxes|karton|pakke(?:r)?)\b/i,
-    /(\d+)\s*[x×]\s*(?:pkg|pack(?:s|ages)?|pall(?:e|er|es)?|collies|colli|kolli|pcs|stk|pieces?|units?|boxes|karton|pakke(?:r)?)\b/i,
-    /(\d+)\s*(?:units?|pcs|stk|styk|pieces?|collies|colli|kolli|pkg|pall(?:e|er)?|st\b)\b/i,
+    // "3x 120 x 80 x 105 cm" / "2x120x80x100" — qty then dimensions
+    /^(\d+)\s*[x×]\s*\d/i,
+    // "2 pallets:" / "4x paller" / "3 Pall – 120X80X127" / "1 PKG …"
+    new RegExp(`^(\\d+)\\s*[x×]\\s*(?:${QTY_UNIT})\\b`, 'i'),
+    new RegExp(`^(\\d+)\\s*(?:${QTY_UNIT})\\b`, 'i'),
+    new RegExp(`(\\d+)\\s*[x×]\\s*(?:${QTY_UNIT})\\b`, 'i'),
+    new RegExp(
+      `(\\d+)\\s*(?:units?|pcs|stk|styk|pieces?|collies|colli|kolli|pkg|pallets?|pall(?:e|er)?|st\\b)\\b`,
+      'i',
+    ),
     /antal[:\s]+(\d+)/i,
     /qty[:\s]+(\d+)/i,
   ]
@@ -457,7 +488,7 @@ function extractQuantity(line: string): number {
     }
   }
 
-  // "2x 120x80x100" — qty before dimensions, not the first dim itself
+  // "… 2x 120x80x100" — qty immediately before a dim triple
   const dimLike = line.match(
     /(\d+)\s*[x×]\s*(\d+[.,]?\d*)\s*[x×]\s*(\d+[.,]?\d*)\s*[x×/]/i,
   )
@@ -473,45 +504,77 @@ function extractQuantity(line: string): number {
   return 1
 }
 
-function extractWeight(line: string): number {
+/** Extract weight from a cargo line. Returns { kg, perUnit }. */
+function extractWeightInfo(line: string): { kg: number; perUnit: boolean } {
   // Skip total/header weight lines — those are handled separately
   if (
     /^(?:total\s+)?gross\s*(?:wt|weight)\b/i.test(line.trim()) ||
-    /^total\s*(gross\s*)?(wt|weight|vægt)/i.test(line.trim())
+    /^total\s*(gross\s*)?(wt|weight|vægt)/i.test(line.trim()) ||
+    /^total\b/i.test(line.trim())
   ) {
-    return 0
+    return { kg: 0, perUnit: false }
   }
+  const perUnitHint =
+    /\b(?:each|ea|pr\.?|per\s*(?:unit|stk|pcs|colli|palle|pallet))\b/i.test(
+      line,
+    )
+  const kgNum =
+    '(\\d{1,3}(?:[.,]\\d{3})+(?:[.,]\\d+)?|\\d+[.,]\\d+|\\d+)'
   const patterns = [
-    // "/ 7200kg" or "/ 1500kg each" after dimensions
-    /\/\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+[.,]?\d*)\s*kg(?:\s*(?:each|ea|pr\.?|per\s*(?:unit|stk|pcs)))?/i,
-    /(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+[.,]?\d*)\s*kg(?:\s*(?:each|ea|pr\.?|per\s*(?:unit|stk|pcs)|\/\s*(?:stk|pcs|palle|colli|unit)))?/i,
-    /(?:vægt|weight|gross\s*wt)\s*[:=]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+[.,]?\d*)/i,
+    // "– 1.057 kg" / "/ 7200kg" after dimensions
+    new RegExp(`(?:[–—\\-\\/]|brutto)?\\s*${kgNum}\\s*kgs?\\b`, 'i'),
+    new RegExp(
+      `${kgNum}\\s*kgs?(?:\\s*(?:each|ea|pr\\.?|per\\s*(?:unit|stk|pcs)|\\/\\s*(?:stk|pcs|palle|colli|unit)))?`,
+      'i',
+    ),
+    new RegExp(
+      `(?:vægt|weight|gross\\s*wt|bruttovægt)\\s*[:=]?\\s*${kgNum}`,
+      'i',
+    ),
   ]
   for (const re of patterns) {
     const m = line.match(re)
     if (m) {
-      const n = parseNum(m[1])
-      if (Number.isFinite(n) && n > 0) return n
+      const n = parseKgNum(m[1])
+      if (Number.isFinite(n) && n > 0) return { kg: n, perUnit: perUnitHint }
     }
   }
-  return 0
+  return { kg: 0, perUnit: false }
 }
 
 function extractTotalGrossWeightKg(text: string): number | null {
   const patterns = [
-    /total\s*gross\s*wt\s*[:=]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+[.,]?\d*)\s*kg/i,
-    /total\s*(?:gross\s*)?(?:weight|vægt)\s*[:=]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+[.,]?\d*)\s*kg/i,
+    /total\s*gross\s*wt\s*[:=]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+[.,]?\d*)\s*kgs?\b/i,
+    /total\s*(?:gross\s*)?(?:weight|vægt)\s*[:=]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+[.,]?\d*)\s*kgs?\b/i,
     // Packing list header: "Gross Weight 9900 kg" / "Gross Weight\t9900 kg"
-    /(?:^|\n)\s*gross\s*weight\s*[:=]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+[.,]?\d*)\s*kg/im,
-    /samlet\s*vægt\s*[:=]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+[.,]?\d*)\s*kg/i,
+    /(?:^|\n)\s*gross\s*weight\s*[:=]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+[.,]?\d*)\s*kgs?\b/im,
+    /samlet\s*vægt\s*[:=]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d+)?|\d+[.,]?\d*)\s*kgs?\b/i,
+    // Standalone total line: "10.079,00 kgs" / "10079 kg"
+    /(?:^|\n)\s*(\d{1,3}(?:[.,]\d{3})+(?:[.,]\d+)?|\d{4,}(?:[.,]\d+)?)\s*kgs?\s*(?:\n|$)/im,
   ]
   for (const re of patterns) {
     const m = text.match(re)
     if (m) {
-      const n = parseNum(m[1])
+      const n = parseKgNum(m[1])
       if (Number.isFinite(n) && n > 0) return n
     }
   }
+  // "Total bruttovægt 19.129 kg" / "Total bruttovægt: 19.129 kg"
+  const brutto = text.match(
+    /total\s*bruttovægt\s*[:=]?\s*(\d{1,3}(?:[.,]\d{3})*(?:[.,]\d+)?|\d+[.,]?\d*)\s*kgs?\b/i,
+  )
+  if (brutto) {
+    const n = parseKgNum(brutto[1])
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  return null
+}
+
+function axisFromLabel(label: string): 'l' | 'w' | 'h' | null {
+  const t = label.toLowerCase()
+  if (/^(?:long|length|længde|lengte|depth|dybde|l)$/.test(t)) return 'l'
+  if (/^(?:wide|width|bredde|bred|w|b)$/.test(t)) return 'w'
+  if (/^(?:high|height|højde|h)$/.test(t)) return 'h'
   return null
 }
 
@@ -606,6 +669,47 @@ function findDimensions(line: string): DimHit | null {
     }
   }
 
+  // English packing notes: "1.40m high x 1.20m wide x 1.65m long"
+  // Axis order varies — map labels to L/W/H.
+  {
+    const axis =
+      'high|height|højde|wide|width|bredde|long|length|længde|depth|dybde|h|w|b|l'
+    const re = new RegExp(
+      `(\\d+[.,]?\\d*)\\s*(${UNIT_GROUP})?\\s*(${axis})\\s*[x×*]\\s*(\\d+[.,]?\\d*)\\s*(${UNIT_GROUP})?\\s*(${axis})\\s*[x×*]\\s*(\\d+[.,]?\\d*)\\s*(${UNIT_GROUP})?\\s*(${axis})\\b`,
+      'gi',
+    )
+    let m: RegExpExecArray | null
+    while ((m = re.exec(line)) !== null) {
+      const parts = [
+        { v: parseNum(m[1]), u: m[2], a: axisFromLabel(m[3]!) },
+        { v: parseNum(m[4]), u: m[5], a: axisFromLabel(m[6]!) },
+        { v: parseNum(m[7]), u: m[8], a: axisFromLabel(m[9]!) },
+      ]
+      if (parts.some((p) => !p.a || !Number.isFinite(p.v) || p.v <= 0)) continue
+      const by: Record<'l' | 'w' | 'h', { v: number; u?: string }> = {
+        l: { v: 0 },
+        w: { v: 0 },
+        h: { v: 0 },
+      }
+      for (const p of parts) {
+        by[p.a!] = { v: p.v, u: p.u }
+      }
+      if (!by.l.v || !by.w.v || !by.h.v) continue
+      candidates.push({
+        l: by.l.v,
+        w: by.w.v,
+        h: by.h.v,
+        unitL: by.l.u,
+        unitW: by.w.u,
+        unitH: by.h.u,
+        unitRaw: by.l.u ?? by.w.u ?? by.h.u,
+        index: m.index,
+        length: m[0].length,
+        perAxis: true,
+      })
+    }
+  }
+
   const simplePatterns: RegExp[] = [
     // Each unit: 1550 x 1720 x 860 mm (LWH)
     new RegExp(
@@ -656,17 +760,21 @@ function findDimensions(line: string): DimHit | null {
   }
 
   for (const re of simplePatterns) {
-    const m = line.match(re)
-    if (!m) continue
-    candidates.push({
-      l: parseNum(m[1]),
-      w: parseNum(m[2]),
-      h: parseNum(m[3]),
-      unitRaw: m[4],
-      index: m.index ?? 0,
-      length: m[0].length,
-      perAxis: false,
-    })
+    // Collect all matches — prefer rightmost (dims after "3x …")
+    const flags = re.flags.includes('g') ? re.flags : `${re.flags}g`
+    const globalRe = new RegExp(re.source, flags)
+    let m: RegExpExecArray | null
+    while ((m = globalRe.exec(line)) !== null) {
+      candidates.push({
+        l: parseNum(m[1]),
+        w: parseNum(m[2]),
+        h: parseNum(m[3]),
+        unitRaw: m[4],
+        index: m.index,
+        length: m[0].length,
+        perAxis: false,
+      })
+    }
   }
 
   // Prefer the rightmost / longest match (dims usually at end of packing rows)
@@ -715,13 +823,19 @@ function findDimensions(line: string): DimHit | null {
 function lineLooksLikeCargo(line: string): boolean {
   if (!/\d/.test(line)) return false
   // Skip pure totals / headers
-  if (/^total\s+(pieces|packages|packs|gross|volume|wt)/i.test(line)) return false
+  if (/^total\b/i.test(line.trim())) return false
+  if (/^ordre\b/i.test(line.trim())) return false
+  if (/^antal\s*colli\b/i.test(line.trim())) return false
+  if (/^total\s+(pieces|packages|packs|gross|volume|wt|cbm|brutto)/i.test(line))
+    return false
   if (/^(?:quantity|gross\s*weight|volume)\b/i.test(line)) return false
   if (/^pieces?\s+piece\s*type/i.test(line)) return false
   if (/^packages?\s+type\s+weight/i.test(line)) return false
   if (/^packs?\s*\(cont/i.test(line)) return false
   if (/^dimensions?\s*$/i.test(line)) return false
   if (/med venlig hilsen|best regards/i.test(line)) return false
+  // Standalone total weight only: "10.079,00 kgs"
+  if (/^\s*[\d.,\s]+\s*kgs?\s*$/i.test(line)) return false
 
   return (
     /\b\d{2,4}(?:[.,]\d+)?\s+\d{2,4}(?:[.,]\d+)?\s+\d{2,4}(?:[.,]\d+)?\s*(?:cm|cms|mm)\b/i.test(
@@ -735,11 +849,14 @@ function lineLooksLikeCargo(line: string): boolean {
     /\d+[.,]?\d*\s*(?:mm|cms?|m)\s*[x×*]\s*\d+[.,]?\d*\s*(?:mm|cms?|m)\s*[x×*]\s*\d+/i.test(
       line,
     ) ||
+    /\d+[.,]?\d*\s*(?:mm|cms?|m)?\s*(?:high|height|højde|wide|width|long|length|længde)\b/i.test(
+      line,
+    ) ||
     /\d+[.,]?\d*\s*-\s*\d+[.,]?\d*\s*-\s*\d+/i.test(line) ||
     /\bl\s*[:=]?\s*\d/i.test(line) ||
     /længde/i.test(line) ||
     /each\s+unit/i.test(line) ||
-    /\b(pall(?:e|er|es)?|collies|colli|kolli|pakke|karton|kasse|gods|pcs|stk|units?|pkg|pack(?:s|ages)?)\b/i.test(
+    /\b(pallets?|pall(?:e|er|es)?|collies|colli|kolli|pakke|karton|kasse|gods|pcs|stk|units?|pkg|pack(?:s|ages)?)\b/i.test(
       line,
     )
   )
@@ -891,8 +1008,6 @@ export function scanEmailCargoLocal(text: string): ScannedCargoDraft[] {
 
   for (const line of expanded) {
     if (!lineLooksLikeCargo(line)) continue
-    const dim = findDimensions(line)
-    if (!dim) continue
 
     // Prefer qty from header ("20 units"), not from "Each unit"
     const headerPart = line.includes('|') ? line.split('|')[0]! : line
@@ -902,7 +1017,25 @@ export function scanEmailCargoLocal(text: string): ScannedCargoDraft[] {
         ? Math.max(1, qtyFromHeader)
         : extractQuantity(line)
 
-    const weightKg = extractWeight(line)
+    // Strip leading "3x " so dims are not read as 3×120×80
+    let dimLine = line
+    const qtyStrip = line.match(/^(\d+)\s*[x×]\s*(?=\d)/i)
+    if (qtyStrip && qty > 1) {
+      dimLine = line.slice(qtyStrip[0].length).trim()
+    }
+    const dim = findDimensions(dimLine) ?? findDimensions(line)
+    if (!dim) continue
+
+    const wInfo = extractWeightInfo(line)
+    // Packing lists often give LINE total ("3x … – 1.057 kg"), not per colli.
+    // Do not divide when the line says each/unit, or weight is after "/".
+    let weightKg = wInfo.kg
+    const lineTotalHint =
+      /[–—\-]\s*[\d.,]+\s*kgs?\b/i.test(line) ||
+      /\bbrutto\b/i.test(line)
+    if (weightKg > 0 && !wInfo.perUnit && qty > 1 && lineTotalHint) {
+      weightKg = Math.round((weightKg / qty) * 10) / 10
+    }
     const name = inferName(headerPart, drafts.length)
     // Include weight so identical dims with different kg stay separate rows
     const key = `${dim.l}x${dim.w}x${dim.h}|${Math.round(weightKg * 10) / 10}|${name}`

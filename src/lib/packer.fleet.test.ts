@@ -239,6 +239,32 @@ describe('occupancy LDM (reel gulvplads)', () => {
   })
 })
 
+describe('ordre fleet fits on ≤2 trailers', () => {
+  it('packs 58 palletised colli (~19 t) on at most 2×13,6 m', () => {
+    // Representative mix from customer ordre (dims cm, weights are per-colli)
+    const items: CargoItem[] = [
+      { id: 'a', name: 'A', lengthMm: 1200, widthMm: 800, heightMm: 1400, weightKg: 460, quantity: 16, allowRotation: true, stackable: true, color: '#3b82f6' },
+      { id: 'b', name: 'B', lengthMm: 1200, widthMm: 800, heightMm: 1050, weightKg: 350, quantity: 12, allowRotation: true, stackable: true, color: '#22c55e' },
+      { id: 'c', name: 'C', lengthMm: 2350, widthMm: 800, heightMm: 700, weightKg: 340, quantity: 8, allowRotation: true, stackable: true, color: '#f59e0b' },
+      { id: 'd', name: 'D', lengthMm: 2000, widthMm: 800, heightMm: 700, weightKg: 380, quantity: 6, allowRotation: true, stackable: true, color: '#ef4444' },
+      { id: 'e', name: 'E', lengthMm: 1200, widthMm: 800, heightMm: 700, weightKg: 240, quantity: 8, allowRotation: true, stackable: true, color: '#8b5cf6' },
+      { id: 'f', name: 'F', lengthMm: 2350, widthMm: 800, heightMm: 350, weightKg: 230, quantity: 4, allowRotation: true, stackable: true, color: '#06b6d4' },
+      { id: 'g', name: 'G', lengthMm: 2000, widthMm: 1000, heightMm: 400, weightKg: 113, quantity: 2, allowRotation: true, stackable: true, color: '#84cc16' },
+      { id: 'h', name: 'H', lengthMm: 1200, widthMm: 800, heightMm: 350, weightKg: 100, quantity: 2, allowRotation: true, stackable: true, color: '#f97316' },
+    ]
+    const totalQty = items.reduce((s, i) => s + i.quantity, 0)
+    expect(totalQty).toBe(58)
+    const totalKg = items.reduce((s, i) => s + i.weightKg * i.quantity, 0)
+    expect(totalKg).toBeLessThan(24000)
+
+    const fleet = packFleet(items, TRAILER, { allowStacking: true })
+    expect(fleet.vehicleCount).toBeLessThanOrEqual(2)
+    expect(
+      fleet.vehicles.reduce((s, v) => s + v.result.placed.length, 0),
+    ).toBe(58)
+  })
+})
+
 describe('dense row packing (customer 4,8 LDM case)', () => {
   it('packs 5×80×100 + 8×70×115 on ≤5,2 LDM (target ~4,8)', () => {
     const items: CargoItem[] = [

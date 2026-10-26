@@ -137,4 +137,88 @@ Pos  Koli  Koli type  L(m)  B(m)  H(m)  Vægt (kg)
       true,
     )
   })
+
+  it('parses Danish ordre lines with EU thousands as line totals', () => {
+    const drafts = scanEmailCargoLocal(`
+Ordre 5222571
+3x 120 x 80 x 105 cm – 1.057 kg
+3x 235 x 80 x 70 cm – 972 kg
+10x 120 x 80 x 140 cm – 4.608 kg
+Total
+Antal colli 58
+Total CBM 61,36 m³
+Total bruttovægt 19.129 kg
+`)
+    const totalQty = drafts.reduce((s, d) => s + d.quantity, 0)
+    expect(totalQty).toBe(16)
+
+    const eur = drafts.find(
+      (d) =>
+        d.lengthMm === 1200 &&
+        d.widthMm === 800 &&
+        d.heightMm === 1050 &&
+        d.quantity === 3,
+    )
+    expect(eur).toBeTruthy()
+    // 1.057 kg line total → ~352.3 kg each
+    expect(eur!.weightKg).toBeCloseTo(1057 / 3, 0)
+
+    const ten = drafts.find(
+      (d) =>
+        d.lengthMm === 1200 &&
+        d.widthMm === 800 &&
+        d.heightMm === 1400 &&
+        d.quantity === 10,
+    )
+    expect(ten).toBeTruthy()
+    expect(ten!.weightKg).toBeCloseTo(4608 / 10, 0)
+
+    const totalKg = drafts.reduce((s, d) => s + d.weightKg * d.quantity, 0)
+    expect(totalKg).toBeCloseTo(1057 + 972 + 4608, 0)
+  })
+
+  it('parses English high x wide x long (meters) with total kgs', () => {
+    const drafts = scanEmailCargoLocal(`
+10.079,00 kgs
+1 pallet: 1.40m high x 1.20m wide x 1.65m long
+2 pallets: 0.85m high x 1.20m wide x 1.65m long
+2 pallets: 1.20m high x 1.20m wide x 1.65m long
+1 pallet: 0.80m high x 1.20m wide x 1.65m long
+1 pallet: 1.12m high x 1.15m wide x 1.65m long
+2 pallets: 1.10m high x 1.15m wide x 1.65m long
+2 pallets: 1.15m high x 1.00m wide x 1.65m long
+1 pallet: 0.75m high x 1.15m wide x 1.65m long
+1 pallet: 1.15m high x 1.15m wide x 1.65m long
+4 pallets: 1.15m high x 1.20m wide x 1.65m long
+1 pallet: 1.35m high x 1.00m wide x 1.65m long
+1 pallet: 0.85m high x 1.00m wide x 1.65m long
+1 pallet: 0.80m high x 1.00m wide x 1.65m long
+2 pallets: 1.10m high x 1.20m wide x 1.65m long
+1 pallet: 0.75m high x 1.00m wide x 1.65m long
+`)
+    const totalQty = drafts.reduce((s, d) => s + d.quantity, 0)
+    expect(totalQty).toBe(23)
+
+    const first = drafts.find(
+      (d) =>
+        d.lengthMm === 1650 &&
+        d.widthMm === 1200 &&
+        d.heightMm === 1400 &&
+        d.quantity === 1,
+    )
+    expect(first).toBeTruthy()
+
+    const four = drafts.find(
+      (d) =>
+        d.lengthMm === 1650 &&
+        d.widthMm === 1200 &&
+        d.heightMm === 1150 &&
+        d.quantity === 4,
+    )
+    expect(four).toBeTruthy()
+
+    const totalKg = drafts.reduce((s, d) => s + d.weightKg * d.quantity, 0)
+    expect(totalKg).toBeGreaterThan(10000)
+    expect(totalKg).toBeLessThan(10200)
+  })
 })
