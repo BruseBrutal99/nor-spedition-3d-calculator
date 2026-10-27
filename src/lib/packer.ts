@@ -451,7 +451,18 @@ function packGuillotineShelves(
       a.cargoId.localeCompare(b.cargoId),
   )
 
+  type Column = {
+    x: number
+    y: number
+    baseL: number
+    baseW: number
+    topZ: number
+    stackable: boolean
+    cargoId: string
+  }
+
   const placed: PlacedBox[] = []
+  const columns: Column[] = []
   const unplaced: LoadResult['unplaced'] = []
   let totalWeight = 0
   let shelfX = 0
@@ -473,46 +484,132 @@ function packGuillotineShelves(
     totalWeight += p.weightKg
   }
 
-  /** Stack more pieces on top of a floor slot while height/weight allow. */
-  const stackOnColumn = (
-    base: Piece,
-    baseSize: Size,
+  const tryStackOne = (col: Column): boolean => {
+    if (!allowStacking || !col.stackable) return false
+    let bestJ = -1
+    let bestSize: Size | null = null
+    let bestKey = -Infinity
+    for (let j = 0; j < remaining.length; j++) {
+      const p = remaining[j]!
+      if (!p.stackable) continue
+      if (totalWeight + p.weightKg > equipment.maxWeightKg) continue
+      for (const s of p.sizes) {
+        if (s.l > col.baseL + 0.5) continue
+        if (s.w > col.baseW + 0.5) continue
+        if (col.topZ + s.h > equipment.heightMm + 0.5) continue
+        const sameId = p.cargoId === col.cargoId ? 1e9 : 0
+        const fit =
+          Math.abs(s.l - col.baseL) < 0.5 && Math.abs(s.w - col.baseW) < 0.5
+            ? 1e6
+            : 0
+        const key = sameId + fit + s.l * s.w * 1e-3 + s.h
+        if (key > bestKey) {
+          bestKey = key
+          bestJ = j
+          bestSize = s
+        }
+      }
+    }
+    if (bestJ < 0 || !bestSize) return false
+    const p = remaining.splice(bestJ, 1)[0]!
+    placeAt(p, col.x, col.y, col.topZ, bestSize)
+    col.topZ += bestSize.h
+    return true
+  }
+
+  const stackOnColumn = (col: Column) => {
+    let guard = 0
+    while (guard++ < 40 && tryStackOne(col)) {
+      /* keep stacking */
+    }
+  }
+
+  const addFloorColumn = (
+    p: Piece,
     x: number,
     y: number,
-  ) => {
-    if (!allowStacking || !base.stackable) return
-    let topZ = baseSize.h
+    size: Size,
+  ): Column => {
+    placeAt(p, x, y, 0, size)
+    const col: Column = {
+      x,
+      y,
+      baseL: size.l,
+      baseW: size.w,
+      topZ: size.h,
+      stackable: p.stackable,
+      cargoId: p.cargoId,
+    }
+    columns.push(col)
+    stackOnColumn(col)
+    return col
+  }
+
+  /** Fill L-shaped leftovers inside the current shelf band. */
+  const fillShelfResiduals = (shelfOrigin: number, shelfDepth: number) => {
+    let free: FreeRect[] = [
+      { x: shelfOrigin, y: 0, l: shelfDepth, w: equipment.widthMm },
+    ]
+    for (const box of placed) {
+      if (box.z > 0.5) continue
+      if (box.x + box.lengthMm < shelfOrigin + 0.5) continue
+      if (box.x > shelfOrigin + shelfDepth - 0.5) continue
+      free = subtractFreeRect(free, {
+        x: box.x,
+        y: box.y,
+        l: box.lengthMm,
+        w: box.widthMm,
+      })
+    }
+
     let guard = 0
-    while (guard++ < 40 && remaining.length > 0) {
+    while (remaining.length > 0 && guard++ < 200) {
       let bestJ = -1
       let bestSize: Size | null = null
-      let bestKey = -Infinity
+      let bestX = 0
+      let bestY = 0
+      let bestScore = -Infinity
+      let bestX2 = Infinity
+      let bestY2 = Infinity
+
       for (let j = 0; j < remaining.length; j++) {
         const p = remaining[j]!
-        if (!p.stackable) continue
         if (totalWeight + p.weightKg > equipment.maxWeightKg) continue
         for (const s of p.sizes) {
-          if (s.l > baseSize.l + 0.5) continue
-          if (s.w > baseSize.w + 0.5) continue
-          if (topZ + s.h > equipment.heightMm + 0.5) continue
-          // Prefer same footprint / same cargo, then shorter leftover height
-          const sameId = p.cargoId === base.cargoId ? 1e9 : 0
-          const fit =
-            Math.abs(s.l - baseSize.l) < 0.5 && Math.abs(s.w - baseSize.w) < 0.5
-              ? 1e6
-              : 0
-          const key = sameId + fit - s.h
-          if (key > bestKey) {
-            bestKey = key
-            bestJ = j
-            bestSize = s
+          for (const fr of free) {
+            if (s.l > fr.l + 0.5 || s.w > fr.w + 0.5) continue
+            const across = Math.floor((fr.w + 0.5) / s.w)
+            if (across < 1) continue
+            const score = s.l * across * s.w
+            const betterPos =
+              fr.x < bestX2 - 0.5 ||
+              (Math.abs(fr.x - bestX2) < 0.5 && fr.y < bestY2 - 0.5)
+            const samePos =
+              Math.abs(fr.x - bestX2) < 0.5 && Math.abs(fr.y - bestY2) < 0.5
+            if (
+              betterPos ||
+              (samePos && score > bestScore + 1e-6)
+            ) {
+              bestScore = score
+              bestX2 = fr.x
+              bestY2 = fr.y
+              bestJ = j
+              bestSize = s
+              bestX = fr.x
+              bestY = fr.y
+            }
           }
         }
       }
       if (bestJ < 0 || !bestSize) break
       const p = remaining.splice(bestJ, 1)[0]!
-      placeAt(p, x, y, topZ, bestSize)
-      topZ += bestSize.h
+      addFloorColumn(p, bestX, bestY, bestSize)
+      free = subtractFreeRect(free, {
+        x: bestX,
+        y: bestY,
+        l: bestSize.l,
+        w: bestSize.w,
+      })
     }
   }
 
@@ -548,24 +645,11 @@ function packGuillotineShelves(
       }
     }
 
-    if (openIdx < 0) {
-      for (const p of remaining) {
-        unplaced.push({
-          cargoId: p.cargoId,
-          name: `${p.name} #${p.itemIndex}`,
-          reason:
-            totalWeight + p.weightKg > equipment.maxWeightKg
-              ? 'Vægtgrænse overskredet'
-              : 'Ikke plads i udstyr',
-        })
-      }
-      break
-    }
+    if (openIdx < 0) break
 
     const first = remaining.splice(openIdx, 1)[0]!
     const shelfDepth = first.size.l
-    placeAt(first, shelfX, 0, 0, first.size)
-    stackOnColumn(first, first.size, shelfX, 0)
+    addFloorColumn(first, shelfX, 0, first.size)
     let y = first.size.w
 
     let guard = 0
@@ -591,27 +675,89 @@ function packGuillotineShelves(
       }
       if (bestJ < 0 || !bestSize) break
       const p = remaining.splice(bestJ, 1)[0]!
-      placeAt(p, shelfX, y, 0, bestSize)
-      stackOnColumn(p, bestSize, shelfX, y)
+      addFloorColumn(p, shelfX, y, bestSize)
       y += bestSize.w
     }
 
+    fillShelfResiduals(shelfX, shelfDepth)
     shelfX += shelfDepth
   }
 
+  if (allowStacking && remaining.length > 0) {
+    let progress = true
+    let topGuard = 0
+    while (progress && remaining.length > 0 && topGuard++ < 200) {
+      progress = false
+      const order = [...columns].sort(
+        (a, b) => b.baseL * b.baseW - a.baseL * a.baseW || a.topZ - b.topZ,
+      )
+      for (const c of order) {
+        if (tryStackOne(c)) {
+          progress = true
+          break
+        }
+      }
+    }
+  }
+
+  for (const p of remaining) {
+    unplaced.push({
+      cargoId: p.cargoId,
+      name: `${p.name} #${p.itemIndex}`,
+      reason:
+        totalWeight + p.weightKg > equipment.maxWeightKg
+          ? 'Vægtgrænse overskredet'
+          : 'Ikke plads i udstyr',
+    })
+  }
+
   return { placed, unplaced, totalWeight }
+}
+
+type DeckPack = {
+  placed: PlacedBox[]
+  unplaced: LoadResult['unplaced']
+  totalWeight: number
+}
+
+/** Prefer more cargo placed, then shorter floor length, then more stacking. */
+function pickBetterDeck(a: DeckPack, b: DeckPack): DeckPack {
+  const score = (p: DeckPack) => {
+    const extent = p.placed.length
+      ? Math.max(...p.placed.map((box) => box.x + box.lengthMm))
+      : 0
+    const stacked = p.placed.filter((box) => box.z > 0.5).length
+    const vol =
+      p.placed.reduce(
+        (s, box) => s + box.lengthMm * box.widthMm * box.heightMm,
+        0,
+      ) / 1e9
+    // Higher is better: placed count dominates, then volume, then stacks, then shorter extent
+    return (
+      p.placed.length * 1e12 -
+      p.unplaced.length * 1e11 +
+      vol * 1e6 +
+      stacked * 1e3 -
+      extent
+    )
+  }
+  return score(b) > score(a) ? b : a
 }
 
 function packSingleDeck(
   items: CargoItem[],
   equipment: Equipment,
   options: PackingOptions,
-): { placed: PlacedBox[]; unplaced: LoadResult['unplaced']; totalWeight: number } {
-  // Stacking needs free-rect nesting; non-stack keeps tight guillotine rows (LDM).
-  if (options.allowStacking) {
-    return packMaxRectsFloor(items, equipment, true)
+): DeckPack {
+  // Non-stack: tight guillotine rows (best LDM for uniform cargo).
+  if (!options.allowStacking) {
+    return packGuillotineShelves(items, equipment, false)
   }
-  return packGuillotineShelves(items, equipment, false)
+  // Stack: try shelf rows AND free-rect nesting — keep the denser result.
+  // (MaxRects alone regressed rotation/stacking on mixed packing lists.)
+  const shelf = packGuillotineShelves(items, equipment, true)
+  const free = packMaxRectsFloor(items, equipment, true)
+  return pickBetterDeck(shelf, free)
 }
 
 /** Furthest X extent per section summed (gap is not loadable). */

@@ -265,6 +265,69 @@ describe('ordre fleet fits on ≤2 trailers', () => {
   })
 })
 
+describe('packing list 50 colli (~38 m³ / 2,2 t)', () => {
+  it('fits on one 13,6 m trailer with stacking', () => {
+    const mk = (
+      id: string,
+      lCm: number,
+      wCm: number,
+      hCm: number,
+      kg: number,
+      qty = 1,
+    ): CargoItem => ({
+      id,
+      name: id,
+      lengthMm: lCm * 10,
+      widthMm: wCm * 10,
+      heightMm: hCm * 10,
+      weightKg: kg,
+      quantity: qty,
+      allowRotation: true,
+      stackable: true,
+      color: '#3b82f6',
+    })
+    // From customer packing list (dims cm, gross kg) — 50 colli, 2241 kg
+    const items: CargoItem[] = [
+      mk('01', 77, 152, 84, 158),
+      mk('02', 144, 47, 154, 32),
+      mk('03', 210, 74, 84, 26),
+      mk('04', 200, 64, 20, 7),
+      mk('05', 200, 95, 105, 142),
+      mk('06', 210, 78, 78, 28, 2),
+      mk('08', 210, 74, 84, 26, 2),
+      mk('10', 216, 88, 100, 30),
+      mk('11', 35, 120, 121, 29),
+      mk('12', 97, 203, 107, 294),
+      mk('13', 201, 73, 84, 26, 4),
+      mk('17', 97, 203, 107, 218),
+      mk('18', 97, 203, 107, 150),
+      mk('19', 25, 164, 109, 26, 8),
+      mk('27', 200, 65, 20, 8, 8),
+      mk('35', 99, 213, 62, 95),
+      mk('36', 200, 65, 20, 7, 5),
+      mk('41', 200, 65, 20, 8, 7),
+      mk('48', 80, 80, 51, 130),
+      mk('49', 97, 203, 107, 280),
+      mk('50', 86, 200, 100, 75),
+    ]
+    const totalQty = items.reduce((s, i) => s + i.quantity, 0)
+    const totalKg = items.reduce((s, i) => s + i.weightKg * i.quantity, 0)
+    expect(totalQty).toBe(50)
+    expect(totalKg).toBeCloseTo(2241, 0)
+
+    const fleet = packFleet(items, TRAILER, { allowStacking: true })
+    expect(fleet.vehicleCount).toBe(1)
+    const result = fleet.vehicles[0]!.result
+    expect(result.placed.length).toBe(50)
+    expect(result.unplaced.length).toBe(0)
+    expect(result.totalWeightKg).toBeCloseTo(2241, 0)
+    // Flat 20 cm cardboard + 25 cm pallets must actually stack
+    const stacked = result.placed.filter((p) => p.z > 0).length
+    expect(stacked).toBeGreaterThanOrEqual(10)
+    expect(result.loadingMeters).toBeLessThan(13.6)
+  })
+})
+
 describe('heterogeneous stackable boxes (customer 2-truck case)', () => {
   it('packs 18 stack-OK colli on one 13,6 m trailer', () => {
     // Dims from UI (cm → mm). All stackable, 0 kg.
