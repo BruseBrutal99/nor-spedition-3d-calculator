@@ -265,6 +265,53 @@ describe('ordre fleet fits on ≤2 trailers', () => {
   })
 })
 
+describe('heterogeneous stackable boxes (customer 2-truck case)', () => {
+  it('packs 18 stack-OK colli on one 13,6 m trailer', () => {
+    // Dims from UI (cm → mm). All stackable, 0 kg.
+    const mk = (
+      id: string,
+      l: number,
+      w: number,
+      h: number,
+      qty: number,
+    ): CargoItem => ({
+      id,
+      name: id,
+      lengthMm: l * 10,
+      widthMm: w * 10,
+      heightMm: h * 10,
+      weightKg: 0,
+      quantity: qty,
+      allowRotation: true,
+      stackable: true,
+      color: '#3b82f6',
+    })
+    const items: CargoItem[] = [
+      mk('p1', 145, 98, 20, 1),
+      mk('p2', 540, 70, 88, 1),
+      mk('p3', 138, 128, 76, 2),
+      mk('p4', 158, 88, 96, 1),
+      mk('p5', 120, 84, 75, 1),
+      mk('p6', 300, 92, 81, 1),
+      mk('p7', 110, 80, 130, 2),
+      mk('p8', 360, 164, 100, 1),
+      mk('p9', 388, 60, 42, 1),
+      mk('p10', 225, 70, 115, 1),
+      mk('p11', 340, 160, 150, 3),
+      mk('p12', 190, 70, 30, 1),
+      mk('p13', 208, 79, 94, 1),
+      mk('p14', 231, 91, 69, 1),
+    ]
+    const totalQty = items.reduce((s, i) => s + i.quantity, 0)
+    expect(totalQty).toBe(18)
+
+    const fleet = packFleet(items, TRAILER, { allowStacking: true })
+    expect(fleet.vehicleCount).toBe(1)
+    expect(fleet.vehicles[0]!.result.placed.length).toBe(18)
+    expect(fleet.vehicles[0]!.result.unplaced.length).toBe(0)
+  })
+})
+
 describe('dense row packing (customer 4,8 LDM case)', () => {
   it('packs 5×80×100 + 8×70×115 on ≤5,2 LDM (target ~4,8)', () => {
     const items: CargoItem[] = [
